@@ -1,0 +1,28 @@
+# 浏览器用户数据目录（含登录态/缓存，勿提交）
+edge_profile/
+.profile*/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# PaddleOCR 模型缓存（运行时自动下载，勿提交）
+.paddleocr/
+
+# 运行时产生的浏览器数据（缓存/账号，勿提交）
+appdata/
+
+# 调试产物
+debug_snapshot.png
+*.log
+logs/
+test*.png
+
+# 抓包调试文件（含 token/cookie/sign 等敏感信息，勿提交）
+api*.txt
+next_api*.txt
+
+# 本地平台私有配置（含真实域名/具体 API 特征，勿提交，避免公开仓库被检索到）
+config_platform.py

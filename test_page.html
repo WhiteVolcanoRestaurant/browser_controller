@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程自动化测试页</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px 20px;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f6f8;
+    color: #1f2329;
+    max-width: 414px;
+    margin: 0 auto;
+  }
+  .page { display: none; }
+  .page.active { display: block; }
+  h2 { font-size: 22px; margin: 0 0 16px; }
+  p { font-size: 17px; line-height: 1.7; color: #3a3f47; }
+  .card {
+    background: #fff;
+    border-radius: 14px;
+    padding: 20px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+    margin-bottom: 20px;
+  }
+  .btn {
+    display: block;
+    width: 100%;
+    margin: 14px 0;
+    padding: 14px 16px;
+    font-size: 18px;
+    text-align: center;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    background: #3478f6;
+    color: #fff;
+  }
+  .btn:active { opacity: 0.85; }
+  .option {
+    display: block;
+    width: 100%;
+    margin: 10px 0;
+    padding: 14px 16px;
+    font-size: 17px;
+    text-align: left;
+    border: 1.5px solid #d9dce1;
+    border-radius: 10px;
+    background: #fff;
+    cursor: pointer;
+  }
+  .option.selected { border-color: #3478f6; background: #eef3ff; }
+  .q-title { color: #e8552f; font-weight: 600; margin-bottom: 6px; }
+  .done { text-align: center; color: #18a058; font-size: 24px; font-weight: 700; padding: 60px 0; }
+</style>
+</head>
+<body>
+
+  <!-- 第 1 页：开始 -->
+  <section class="page active" id="page-1">
+    <div class="card">
+      <h2>课程：《反电信诈骗》</h2>
+      <p>本课程共 3 个知识点，预计学习 5 分钟。</p>
+    </div>
+    <button class="btn" onclick="go(2)">开始学习</button>
+  </section>
+
+  <!-- 第 2 页：内容 1 -->
+  <section class="page" id="page-2">
+    <div class="card">
+      <h2>知识点一：冒充公检法</h2>
+      <p>凡是自称公检法机关，要求你转账到“安全账户”的，都是诈骗。</p>
+    </div>
+    <button class="btn" onclick="go(3)">下一步</button>
+  </section>
+
+  <!-- 第 3 页：内容 2 -->
+  <section class="page" id="page-3">
+    <div class="card">
+      <h2>知识点二：虚假中奖</h2>
+      <p>陌生短信、链接里的“中奖”“领奖”信息，基本都带有诈骗目的。</p>
+    </div>
+    <button class="btn" onclick="go(4)">下一步</button>
+  </section>
+
+  <!-- 第 4 页：多选题 -->
+  <section class="page" id="page-4">
+    <div class="card">
+      <div class="q-title">多选题</div>
+      <h2>下面哪些行为可能涉及电信诈骗，需要提高警惕？</h2>
+      <button class="option" data-opt="A" onclick="pick(this)">A. 接到自称公检法要求转账的电话</button>
+      <button class="option" data-opt="B" onclick="pick(this)">B. 点击陌生短信链接领取奖品</button>
+      <button class="option" data-opt="C" onclick="pick(this)">C. 向陌生人透露银行卡密码和验证码</button>
+      <button class="option" data-opt="D" onclick="pick(this)">D. 通过正规银行柜台办理业务</button>
+    </div>
+    <button class="btn" onclick="submitQuiz()">提交</button>
+  </section>
+
+  <!-- 第 5 页：内容 3 -->
+  <section class="page" id="page-5">
+    <div class="card">
+      <h2>知识点三：保护个人信息</h2>
+      <p>银行卡密码、短信验证码绝不能告诉他人。</p>
+    </div>
+    <button class="btn" onclick="go(6)">下一步</button>
+  </section>
+
+  <!-- 第 6 页：完成 -->
+  <section class="page" id="page-6">
+    <div class="card done">已完成</div>
+  </section>
+
+<script>
+  function go(n) {
+    document.querySelectorAll('.page').forEach(function (p) { p.classList.remove('active'); });
+    document.getElementById('page-' + n).classList.add('active');
+    window.scrollTo(0, 0);
+  }
+  function pick(btn) {
+    btn.classList.toggle('selected');
+  }
+  function submitQuiz() {
+    var sel = document.querySelectorAll('#page-4 .option.selected');
+    if (sel.length === 0) {
+      alert('请至少选择一个选项');
+      return;
+    }
+    go(5);
+  }
+</script>
+</body>
+</html>

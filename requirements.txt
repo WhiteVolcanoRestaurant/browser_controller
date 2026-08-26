@@ -1,0 +1,7 @@
+playwright
+playwright-stealth
+paddlepaddle-gpu==2.6.2
+paddleocr==2.7.3
+requests
+pillow
+numpy==1.26.4
