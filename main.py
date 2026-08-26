@@ -78,11 +78,14 @@ def main(course_url, enable_vlm=True):
     sandbox = SafetySandbox(config)
     logger = ActionLogger(os.path.join(config.LOG_DIR, "action_log.jsonl"))
 
+    # 两个"进展"计数用途不同（正常跳转/页面变动时都会重置）：
+    # - no_progress_count：决策为 click 但点击后页面无变化（点错/未生效）→ 分级降级恢复
+    # - consecutive_wait_count：决策为 wait（OCR/DOM 均未匹配到目标，无可点击项）→ 连续 N 次触发 VLM 语义兜底
     page_count = 0
-    no_progress_count = 0  # 连续点击后页面无变化的累计次数，用于分级降级恢复
+    no_progress_count = 0  # 连续"点击了但页面无变化"的次数，用于分级降级恢复
     reload_count = 0       # 单次运行累计自动刷新次数，超过上限则停止（防封号）
     prev_url = ""          # 上一轮页面 URL，用于检测平台自动跳转
-    consecutive_wait_count = 0  # 连续"未匹配目标"的 wait 次数，达到阈值触发 VLM 语义兜底
+    consecutive_wait_count = 0  # 连续"未匹配目标(决策 wait)"的次数，达到阈值触发 VLM 语义兜底
     try:
         # 2. 打开课程页面
         page = browser.navigate(course_url)
@@ -104,6 +107,8 @@ def main(course_url, enable_vlm=True):
                     print(f"[跳转] 页面 URL 变化: {prev_url} -> {current_url}")
                     # 页面跳转说明有进展，重置无进展计数，避免跳转瞬间被误判为死循环
                     no_progress_count = 0
+                    # 页面已变动，重置"未匹配"计数，避免上一页的累计次数触发 VLM
+                    consecutive_wait_count = 0
                     # 往回跳：从详情页跳回列表页，判定本课完成
                     if _is_course_finished_jump(prev_url, current_url):
                         logger.log(step=page_count, action="completed",
@@ -194,7 +199,7 @@ def main(course_url, enable_vlm=True):
                         consecutive_wait_count = 0
                     else:
                         consecutive_wait_count += 1
-                        if consecutive_wait_count >= 2:
+                        if consecutive_wait_count >= 3:
                             video = browser.detect_video()
                             if not video.get("has_video"):
                                 print(f"[语义兜底] 连续 {consecutive_wait_count} 次未匹配，让 VLM 判断推进按钮...")
@@ -203,6 +208,8 @@ def main(course_url, enable_vlm=True):
                                     decision_result = semantic
                                     consecutive_wait_count = 0
                 else:
+                    # 决策不是"未匹配 wait"（已匹配到按钮准备点击/其它动作），
+                    # 说明未匹配状态解除，重置计数
                     consecutive_wait_count = 0
 
                 # 3.4 通用安全校验（URL 白名单 S1）
@@ -263,6 +270,7 @@ def main(course_url, enable_vlm=True):
 
                     if clicked_ok:
                         no_progress_count = 0  # 有进展，重置计数
+                        consecutive_wait_count = 0  # 页面已变动，重置"未匹配"计数
                         # 防封号：随机延迟模拟真人学习
                         random_delay = random.uniform(config.MIN_DELAY_SEC, config.MAX_DELAY_SEC)
                         browser.wait(int(random_delay * 1000))
