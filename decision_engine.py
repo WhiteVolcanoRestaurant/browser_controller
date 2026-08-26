@@ -91,13 +91,11 @@ class DecisionEngine:
     def decide(self, screenshot, ocr_results, page_url):
         all_text = " ".join(r.get("text", "") for r in ocr_results)
 
-        # 步骤 0：结束检测（最高优先级）。识别到"已完成/学习完成"等结束标志直接终止。
-        if any(et in all_text for et in self.config.END_TEXTS):
-            return {"action": "terminate", "target": "", "confidence": 1.0,
-                    "reason": "检测到课程完成标志"}
-
         # 步骤 1：优先匹配"推进进度"按钮（start/next）。学习内容页最明确的信号。
-        # 必须放在题目检测之前：内容页文本里可能含"选择"等词，若先走题目检测会被误判成题目页。
+        # 必须排在结束检测之前：阶段性完成页会同时出现"恭喜你，你已完成了本微课"
+        # 与"下一页"（接着进测验），有"下一页"就优先点击推进，而不是误判成课程结束；
+        # 真正的结束页是"课程的学习已完成"正文 + "返回列表"按钮（没有"下一页"）。
+        # 也必须放在题目检测之前：内容页文本里可能含"选择"等词，先走题目检测会误判成题目页。
         for priority in ("start", "next"):
             keywords = self.config.TARGET_BUTTONS[priority]
             matched = self.ocr_engine.filter_by_keywords(ocr_results, keywords)
@@ -112,7 +110,14 @@ class DecisionEngine:
                         "candidates": candidates}
             # 低置信度：继续尝试下一个优先级
 
-        # 步骤 2：题目检测（VLM）。没有明确翻页按钮时，才检查是否题目页，
+        # 步骤 2：结束检测。没有可点的翻页按钮时才检查结束标志。
+        # 结束标志只认正文"课程的学习已完成"等（按钮"返回列表"可能与其它页面内容冲突，
+        # 不能用按钮文字判定；也不用裸"已完成"，阶段性文案"你已完成了本微课"会误判）。
+        if any(et in all_text for et in self.config.END_TEXTS):
+            return {"action": "terminate", "target": "", "confidence": 1.0,
+                    "reason": "检测到课程完成标志"}
+
+        # 步骤 3：题目检测（VLM）。没有明确翻页按钮时，才检查是否题目页，
         #        交给 VLM 用"逻辑能力"读题作答。
         if any(k in all_text for k in self.config.QUESTION_KEYWORDS):
             result = self._call_vlm_fallback(screenshot, ocr_results, page_url)
@@ -121,7 +126,7 @@ class DecisionEngine:
                         "reason": result.get("reason", "检测到题目但无法自动作答")}
             return result
 
-        # 步骤 3：submit 按钮（提交/确认/确定）——非题目页的确认按钮
+        # 步骤 4：submit 按钮（提交/确认/确定）——非题目页的确认按钮
         matched = self.ocr_engine.filter_by_keywords(
             ocr_results, self.config.TARGET_BUTTONS["submit"])
         if matched:
@@ -133,7 +138,7 @@ class DecisionEngine:
                         "confidence": candidates[0]["confidence"],
                         "candidates": candidates}
 
-        # 步骤 3.5：引导点击（"点击了解/点击查看"等引导语按钮）——标准翻页/提交都没有时，
+        # 步骤 5：引导点击（"点击了解/点击查看"等引导语按钮）——标准翻页/提交都没有时，
         #        尝试点击页面底部的"点击 xxx"引导元素（反诈案例页常见，如"点击了解经过"）。
         #        排 submit 之后、wait 之前：无 VLM 模式下推进的最后一次机会；
         #        候选按从下到上排序（filter_by_keywords），先点最靠下的引导元素。
@@ -148,7 +153,7 @@ class DecisionEngine:
                         "confidence": candidates[0]["confidence"],
                         "candidates": candidates}
 
-        # 步骤 4：OCR 无结果时等待（可能是登录页或页面尚未渲染），不触发 VLM
+        # 步骤 6：OCR 无结果时等待（可能是登录页或页面尚未渲染），不触发 VLM
         if not ocr_results:
             return {"action": "wait", "reason": "OCR未识别到文字，等待页面加载或用户登录"}
 
