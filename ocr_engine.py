@@ -132,7 +132,9 @@ class OCREngine:
         return results
 
     def filter_by_keywords(self, ocr_results, keywords):
-        # 模糊匹配（text 包含任一关键词），按置信度降序返回。
+        # 模糊匹配（text 包含任一关键词），按"从下到上"（y 坐标降序）返回。
+        # 推进/翻页按钮通常在页面底部、正文在上方，从下到上优先尝试，
+        # 避免正文里的误匹配词（如"再三确认"）排在真实按钮前面被先点。
         # 关键：排除否定形式（如"不确定"不应命中"确定"），避免误点。
         matched = []
         for r in ocr_results:
@@ -144,7 +146,9 @@ class OCREngine:
                         continue
                     matched.append(r)
                     break
-        matched.sort(key=lambda r: r.get("confidence", 0), reverse=True)
+        # 空 bbox（v3 解析可能无坐标）排最后，避免 get_center_point 除零
+        matched.sort(key=lambda r: self.get_center_point(r["bbox"])[1]
+                     if r.get("bbox") else -1, reverse=True)
         return matched
 
     def locate_by_text(self, ocr_results, target_text):

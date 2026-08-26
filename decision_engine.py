@@ -133,6 +133,21 @@ class DecisionEngine:
                         "confidence": candidates[0]["confidence"],
                         "candidates": candidates}
 
+        # 步骤 3.5：引导点击（"点击了解/点击查看"等引导语按钮）——标准翻页/提交都没有时，
+        #        尝试点击页面底部的"点击 xxx"引导元素（反诈案例页常见，如"点击了解经过"）。
+        #        排 submit 之后、wait 之前：无 VLM 模式下推进的最后一次机会；
+        #        候选按从下到上排序（filter_by_keywords），先点最靠下的引导元素。
+        matched = self.ocr_engine.filter_by_keywords(
+            ocr_results, self.config.TARGET_BUTTONS["guide_click"])
+        if matched:
+            candidates = self._build_candidates(matched)
+            if candidates:
+                return {"action": "click",
+                        "x": candidates[0]["x"], "y": candidates[0]["y"],
+                        "target": candidates[0]["target"],
+                        "confidence": candidates[0]["confidence"],
+                        "candidates": candidates}
+
         # 步骤 4：OCR 无结果时等待（可能是登录页或页面尚未渲染），不触发 VLM
         if not ocr_results:
             return {"action": "wait", "reason": "OCR未识别到文字，等待页面加载或用户登录"}

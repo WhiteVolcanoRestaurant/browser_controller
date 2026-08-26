@@ -77,17 +77,31 @@
     <button class="btn" onclick="go(3)">下一步</button>
   </section>
 
-  <!-- 第 3 页：内容 2 -->
+  <!-- 第 3 页：反诈案例（关键词陷阱回归页）
+       正文故意包含"骗子引诱点击""再三确认"等含关键词的句子，
+       验证：guide_click 短语匹配不会命中正文里的裸"点击"；
+       "确认"是 submit 的已知误匹配陷阱（见开发文档坑 15）。 -->
   <section class="page" id="page-3">
+    <div class="card">
+      <h2>案例：出站遭遇诈骗</h2>
+      <p>刚出高铁站，还在核对路线的小全，竟然遭遇诈骗了。</p>
+      <p>骗子引诱点击陌生链接，骗取银行卡信息，千万别信。</p>
+      <p>转账前需要再三确认收款人身份，谨防上当。</p>
+    </div>
+    <button class="btn" onclick="go(4)">点击了解经过</button>
+  </section>
+
+  <!-- 第 4 页：内容 2 -->
+  <section class="page" id="page-4">
     <div class="card">
       <h2>知识点二：虚假中奖</h2>
       <p>陌生短信、链接里的“中奖”“领奖”信息，基本都带有诈骗目的。</p>
     </div>
-    <button class="btn" onclick="go(4)">下一步</button>
+    <button class="btn" onclick="go(5)">下一步</button>
   </section>
 
-  <!-- 第 4 页：多选题 -->
-  <section class="page" id="page-4">
+  <!-- 第 5 页：多选题 -->
+  <section class="page" id="page-5">
     <div class="card">
       <div class="q-title">多选题</div>
       <h2>下面哪些行为可能涉及电信诈骗，需要提高警惕？</h2>
@@ -99,17 +113,17 @@
     <button class="btn" onclick="submitQuiz()">提交</button>
   </section>
 
-  <!-- 第 5 页：内容 3 -->
-  <section class="page" id="page-5">
+  <!-- 第 6 页：内容 3 -->
+  <section class="page" id="page-6">
     <div class="card">
       <h2>知识点三：保护个人信息</h2>
       <p>银行卡密码、短信验证码绝不能告诉他人。</p>
     </div>
-    <button class="btn" onclick="go(6)">下一步</button>
+    <button class="btn" onclick="go(7)">下一步</button>
   </section>
 
-  <!-- 第 6 页：完成 -->
-  <section class="page" id="page-6">
+  <!-- 第 7 页：完成 -->
+  <section class="page" id="page-7">
     <div class="card done">已完成</div>
   </section>
 
@@ -128,7 +142,7 @@
       alert('请至少选择一个选项');
       return;
     }
-    go(5);
+    go(6);
   }
 </script>
 </body>

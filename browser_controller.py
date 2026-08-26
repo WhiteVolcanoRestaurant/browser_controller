@@ -384,8 +384,9 @@ class BrowserController:
             return None
         if not results:
             return None
-        # 选第一个命中（通常页面下方的"下一页/下一步"靠后，但课程详情页只有一个按钮）
-        best = results[-1]
+        # 从下到上优先（推进按钮通常在页面底部、正文在上方），取最靠下的命中
+        results.sort(key=lambda r: r.get("y", 0), reverse=True)
+        best = results[0]
         print(f"[DOM] 通过渲染层定位到关键词: \"{best['hit']}\" -> 匹配 \"{best['text']}\" @ ({int(best['x'])}, {int(best['y'])})")
         return (int(best["x"]), int(best["y"])), best
 
@@ -447,6 +448,8 @@ class BrowserController:
                 all_results.append(r)
         if not all_results:
             return None
+        # 从下到上优先，取最靠下的 next-btn（页面底部通常是当前可点的翻页按钮）
+        all_results.sort(key=lambda r: r.get("y", 0), reverse=True)
         best = all_results[0]
         print(f"[DOM] class 定位翻页按钮: <{best['tag']}> ({best['w']}x{best['h']}) "
               f"@ ({best['x']},{best['y']}) cls={best['cls']}")

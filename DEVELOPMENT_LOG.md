@@ -29,6 +29,7 @@
 - 步骤 1 翻页按钮：`start → next` 的 OCR 关键词匹配（学习内容页最明确信号，优先于题目检测，避免正文"选择"误判）。
 - 步骤 2 题目检测：命中 `QUESTION_KEYWORDS`（多选/判断/哪些…）→ VLM 做题。
 - 步骤 3 提交按钮：`submit` 关键词匹配。
+- 步骤 3.5 引导点击：`guide_click`（点击了解/点击查看/点击进入…）——标准翻页/提交都没有时，点页面底部的"点击 xxx"引导元素（反诈案例页常见）。排 submit 之后、wait 之前，是无 VLM 模式下推进的最后机会。
 - 步骤 4 兜底：OCR 空则 wait，非题目无按钮则 wait。
 
 3、**移动端视口**：`VIEWPORT 414x896` + iPhone UA，消除 H5 页面两侧留白，OCR 只关注课程卡片区域，识别率更高。
@@ -112,6 +113,16 @@
 - **根因**：同一关键词可能命中多个 OCR 位置，但旧逻辑只取第一个（置信度最高）点，点错就卡死。
 - **解法**：`_build_candidates()` 返回同一关键词命中的多个位置，main 循环逐个 `click_and_verify`，点一个无反应就换下一个候选，直到某个真正生效。
 
+### 16、反诈案例页"点击了解经过"匹配不到 → 无 VLM 卡人工；正文关键词陷阱
+- **现象**：测试日志（step 83）OCR 识别到"刚出高铁站…""遭遇诈骗了""点击了解经过"(y=683 页面底部)，但 `TARGET_BUTTONS` 无"点击 xxx"类词 → 未匹配 → 无 VLM 模式直接 `need_human`。
+- **根因**：翻页/提交关键词表只覆盖标准按钮词（下一页/继续/提交/确定），没有反诈案例页常见的"点击了解经过"这类**引导语按钮**；而裸"点击"太宽泛，正文"骗子引诱点击陌生链接"也会命中，误点风险大。
+- **解法**（[config.py](file:///c:/prog_file/code_with_vsc/browser_controller/config.py) / [ocr_engine.py](file:///c:/prog_file/code_with_vsc/browser_controller/ocr_engine.py) / [decision_engine.py](file:///c:/prog_file/code_with_vsc/browser_controller/decision_engine.py)）：
+  1. 新增 `guide_click` 关键词组，**用短语不用裸"点击"**（点击了解/点击查看/点击进入/点击学习/点击打开/点击播放），避免命中正文里的"引诱点击"。
+  2. 匹配顺序排在 submit 之后、wait 之前（步骤 3.5），无 VLM 模式下推进的最后一次机会。
+  3. **全部匹配改为"从下到上"排序**（置信度不好量化，直接用位置）：`filter_by_keywords` 按 y 坐标降序、DOM 兜底 `find_text_element_center`/`find_next_button` 取最靠下命中。依据：推进按钮通常在页面底部、正文在上方，先点最靠下的候选可避开正文误匹配。
+- **已知局限**：正文含"确认"（如"转账前需要再三确认"）仍会先命中 submit"确认"（坑 8/15 同源，submit 关键词过宽），抢在 guide_click 之前被点击；若页面底部真实按钮也含 submit 关键词（如"确认提交"），从下到上排序会优先点到底部按钮。后续可考虑收紧 submit 关键词（排除"再三确认"类上下文）。
+- **回归测试**：`test_page.html` 第 3 页加入"反诈案例（关键词陷阱回归页）"——正文含"骗子引诱点击陌生链接""转账前需要再三确认收款人身份"，底部按钮"点击了解经过"。
+
 ## 四、点击定位的演进史（重要经验）
 
 | 阶段 | 做法 | 结果 |
@@ -134,6 +145,7 @@
 | `MAX_RELOAD_COUNT` | 2 | 自动刷新上限，防封号 |
 | `COURSE_DETAIL_URL_MARK` | `/course/detail` | 详情页 URL 特征，用于「往回跳即结束」 |
 | `NEXT_BUTTON_CLASS_HINTS` | next-btn/next/btn-next | 翻页按钮 class 特征 |
+| `TARGET_BUTTONS["guide_click"]` | 点击了解/查看/进入… | 引导语按钮（反诈案例页），短语匹配防"引诱点击"误命中 |
 
 ## 六、后续优化方向
 
