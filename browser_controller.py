@@ -538,10 +538,25 @@ class BrowserController:
                 continue
         return None
 
+    def _user_enter_pressed(self):
+        # 非阻塞检测终端是否按下 Enter（Windows msvcrt）。
+        # 用于"等待用户手动操作"期间：平台可能不发进度 API、URL 也不变，
+        # 脚本干等超时太慢，用户按 Enter 即可立即唤醒重新识别页面内容。
+        try:
+            import msvcrt
+            if msvcrt.kbhit():
+                ch = msvcrt.getch()
+                if ch in (b"\r", b"\n"):
+                    return True
+        except Exception:
+            pass
+        return False
+
     def wait_for_progress(self, timeout_ms=120000, prev_url=None):
         # 等待"翻页/推进"信号，用于判断人工介入后页面是否真的变了。
         # 信号 1：命中本地配置的推进 API 特征（翻页 / 答题提交，见 config_platform.py）
         # 信号 2：页面 URL 变化
+        # 信号 3：用户按 Enter（平台不发 API、URL 不变时手动唤醒重新识别）
         # 用 page.on("request") 注册事件 + page.wait_for_timeout 驱动事件循环轮询。
         # （注意：Page 没有 wait_for_request 方法，之前误用导致监听完全失效）
         self._progress_hit = False
@@ -565,6 +580,9 @@ class BrowserController:
                     return True, "progress_api"
                 if prev_url and (self.get_current_url() or "") != prev_url:
                     return True, "url_changed"
+                if self._user_enter_pressed():
+                    print("[唤醒] 用户按 Enter，立即重新识别当前页面。")
+                    return True, "user_enter"
                 # 用 page.wait_for_timeout 驱动事件循环，让 page.on 回调被触发
                 self.page.wait_for_timeout(500)
             return False, "timeout"

@@ -358,12 +358,14 @@ def main(course_url, enable_vlm=True):
                             # 第 5 级：人工介入（不再 reload，保住已有进度）
                             print("\n" + "=" * 60)
                             print("[需人工介入] 页面多次点击无进展且 VLM 无法判断（如需逐个点击的知识卡片）。")
-                            print("请在浏览器中手动完成本页操作，脚本检测到翻页后会自动继续（Ctrl+C 退出）。")
+                            print("请在浏览器中手动完成本页操作；完成后按 Enter 可立即继续，或等脚本自动检测到翻页（Ctrl+C 退出）。")
                             logger.log(step=page_count, action="need_human",
                                        details={"page_url": page.url,
                                                 "reason": "多级恢复失败，需人工处理"})
                             changed, why = browser.wait_for_progress(timeout_ms=180000, prev_url=page.url)
-                            if changed:
+                            if changed and why == "user_enter":
+                                print("[继续] 用户按 Enter 唤醒，立即重新识别当前页面。")
+                            elif changed:
                                 print(f"[继续] 检测到 {why}，页面已变化，继续自动处理。")
                             else:
                                 print("[提示] 等待超时，继续循环检测...")
@@ -418,7 +420,9 @@ def main(course_url, enable_vlm=True):
                     print("请在浏览器中手动完成此题，脚本检测到翻页后会自动继续（按 Ctrl+C 可退出）。")
                     prev_need_url = page.url
                     changed, why = browser.wait_for_progress(timeout_ms=180000, prev_url=prev_need_url)
-                    if changed:
+                    if changed and why == "user_enter":
+                        print("[继续] 用户按 Enter 唤醒，立即重新识别当前页面。")
+                    elif changed:
                         print(f"[继续] 检测到 {why}，页面已变化，继续自动处理。")
                         logger.log(step=page_count, action="human_done", details={"reason": why})
                     else:
