@@ -25,6 +25,7 @@
 1、**VLM 不输出坐标，只输出目标文字**：VLM 返回 `action + target_text`，再由 OCR 结果反查 `target_text` 的 bbox 得到精确坐标。避免视觉模型定位不准。
 
 2、**决策分层**（[decision_engine.py](file:///c:/prog_file/code_with_vsc/browser_controller/decision_engine.py)）：
+- ps：为什么不是按照”步骤 0 结束检测：命中 `END_TEXTS`（已完成/学习完成…）→ `terminate`。”提前结束课程，是因为遇到了一节课，参考案例17。
 - 步骤 1 翻页按钮：`start → next` 的 OCR 关键词匹配。**优先于结束检测与题目检测**——阶段性完成页"恭喜你，你已完成了本微课"+"下一页"会优先点"下一页"，而不是误判成课程结束。
 - 步骤 2 结束检测：无可点翻页按钮时，命中 `END_TEXTS`（课程的学习已完成…）→ `terminate`。结束页正文是"课程的学习已完成"，按钮"返回列表"可能与其它页面内容冲突，不用按钮文字判定。
 - 步骤 3 题目检测：命中 `QUESTION_KEYWORDS`（多选/判断/哪些…）→ VLM 做题。
