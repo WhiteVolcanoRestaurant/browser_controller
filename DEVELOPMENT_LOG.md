@@ -185,3 +185,23 @@
 2、`debug_ocr.py` 可单独对某张截图跑 OCR（含 1x/1.5x/2x 多尺度 + 亮度检测），用于快速判断「是截图空白还是 OCR 没识别出来」。
 
 3、OCR 结果乱码（"鎴戜滑閮芥槸"）只是 jsonl 文件被终端按 GBK 读导致的显示问题，不影响实际逻辑。
+
+## 九、本地回归测试（test_page.html + test_flow.py）
+
+`test_page.html` 内置 7 页模拟流程：开始学习 → 知识点 1 → 反诈案例（关键词陷阱回归页）→ 知识点 2 → 多选题 → 知识点 3 → 已完成，覆盖 start / next / submit / guide_click 各类按钮与题目页，用于本地跑通全流程（不连真实平台）。
+
+跑全流程（自动起本地服务器，无需再手动 `python -m http.server`）：
+
+    python test_flow.py              # 默认：VLM 启动时健康检查，不可用自动降级
+    python test_flow.py --no-vlm     # 跳过 VLM，多选题转人工
+    python test_flow.py --port 8000  # 指定服务器端口（默认自动选空闲端口）
+
+说明：
+
+1、`test_flow.py` 自动完成「起服务器 → 打开 http://127.0.0.1:<port>/test_page.html → 跑完整流程 → 关服务器」。
+
+2、测试页第 5 页"多选题"：有 Ollama 时 VLM 自动作答；无 VLM 时会停住等人工作答，脚本检测到翻页后自动继续（与生产逻辑一致）。
+
+3、走到「已完成」页即判定流程跑通、自动退出；Ctrl+C 随时停止，服务器自动关闭。
+
+4、**为何不用 .bat**：此前的 `start.bat` / `test_flow.bat` 双击会秒退出（venv 路径或终端上下文问题），已删除，统一用 `python main.py` / `python test_flow.py` 启动，`--no-vlm` / `--port` 等参数也更灵活。

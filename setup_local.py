@@ -74,7 +74,7 @@ def main():
 
     print(f"\n[完成] 已生成 {OUT_FILE}")
     print("       该文件已被 .gitignore 排除，不会提交到仓库。")
-    print("       现在可以运行： start.bat  或  python main.py")
+    print("       现在可以运行： python main.py")
 
 
 def _render(domain, target_url, detail_mark, marks):

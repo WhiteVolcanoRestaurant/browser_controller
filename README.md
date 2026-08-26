@@ -101,7 +101,7 @@ navigate
 
 ## 四、环境要求
 
-- **OS**：Windows 10/11（依赖 msedge 与 `start.bat`；macOS/Linux 需自行调整）
+- **OS**：Windows 10/11（依赖 msedge；macOS/Linux 需自行调整）
 - **Python**：3.10+（本项目 `venv/` 为 3.11）
 - **浏览器**：Microsoft Edge（`playwright install msedge` 复用系统 Edge）
 - **GPU（可选但推荐）**：NVIDIA + CUDA 11.8（目标环境 RTX 3060 Laptop 6GB）；无 GPU 自动降级 CPU
@@ -145,6 +145,11 @@ python main.py
 python main.py "https://<你的课程平台主页>/课程地址"
 # 跳过 VLM（无 Ollama / 显存不足时）
 python main.py "https://<你的课程平台主页>/课程地址" --no-vlm
+
+# 8. 本地回归测试（不连真实平台，自动起服务器跑通 test_page.html 全流程）
+python test_flow.py
+#    --no-vlm 跳过 VLM（多选题转人工）；--port 8000 指定端口
+python test_flow.py --no-vlm
 ```
 
 > **中文用户名注意**：Windows 用户名含中文（如 `C:\Users\打工`）会导致 PaddleOCR 底层 C++ 引擎加载模型失败。`main.py` / `ocr_engine.py` 已通过重定向 `USERPROFILE`/`HOME` 到项目根目录规避，**不要删除这两段前置代码**。
@@ -159,7 +164,7 @@ python main.py "https://<你的课程平台主页>/课程地址" --no-vlm
 | ----------------------------- | ----------------- |
 | `python main.py URL`          | 主流程自动学习（默认启用 VLM） |
 | `python main.py URL --no-vlm` | 跳过 VLM，思考页直接转人工   |
-| `start.bat [URL]`             | Windows 一键启动      |
+| `python test_flow.py`         | 本地测试页全流程测试（自动起服务器，无需手动 `http.server`） |
 
 ### 调试工具
 
@@ -169,7 +174,8 @@ python main.py "https://<你的课程平台主页>/课程地址" --no-vlm
 | [debug\_ocr.py](debug_ocr.py)                | 单独对某张截图跑 OCR（多尺度 + 亮度检测），排查"识别不到"                                |
 | [debug\_api\_listen.py](debug_api_listen.py) | 监听翻页/答题 API 请求，验证推进信号                                            |
 | [testVLM.py](testVLM.py)                     | 单独测试 Ollama VLM 连通性与返回格式                                         |
-| [test\_page.html](test_page.html)            | 本地测试页（配合 `python -m http.server 8000`）                           |
+| [test\_flow.py](test_flow.py)                 | 本地测试页全流程测试：自动起服务器 → 跑通 test\_page.html → 关服务器 |
+| [test\_page.html](test_page.html)            | 本地测试页（模拟 7 页流程，配合 `python test_flow.py` 使用）                           |
 
 ### 日志与截图
 
@@ -217,7 +223,7 @@ browser_controller/
 ├── report.py              # 可视化台账生成
 ├── debug_ocr.py / debug_api_listen.py / testVLM.py / open_url.py  # 调试工具
 ├── test_page.html         # 本地测试页
-├── start.bat              # 一键启动器
+├── test_flow.py           # 本地测试页全流程测试（自动起服务器）
 ├── requirements.txt       # Python 依赖
 ├── PRD.md                 # 产品需求
 ├── DEVELOPMENT_LOG.md     # 开发踩坑记录
