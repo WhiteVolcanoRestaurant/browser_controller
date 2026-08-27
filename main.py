@@ -124,6 +124,7 @@ def main(course_url, enable_vlm=True):
     consecutive_wait_count = 0  # 连续"未匹配目标(决策 wait)"的次数，达到阈值触发 VLM 语义兜底
     failed_candidates = set()
     force_vlm_reason = ""
+    paused = False  # 按 p 键切换：暂停/继续自动操作
     try:
         # 2. 打开课程页面
         page = browser.navigate(course_url)
