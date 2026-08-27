@@ -4,36 +4,57 @@
 
 | 项目 | 说明 |
 |------|------|
-| **目标** | 自动完成网页课程学习流程（翻页、点击按钮、答题） |
+| **目标** | 自动完成网页课程学习流程（翻页、点击按钮、答题、处理视频） |
 | **输入** | 课程网页 URL |
 | **输出** | 课程完成状态确认 |
 | **核心能力** | 截图识别 -> 文字定位 -> 智能点击 -> 异常处理 |
 | **运行环境** | Windows 11 + Python 3.10+ + RTX 3060 Laptop (6GB 显存) |
-| **关键依赖** | Playwright (msedge)、PaddleOCR (GPU)、Ollama + llava-phi3 (备用) |
+| **关键依赖** | Playwright (msedge)、PaddleOCR (GPU)、Ollama + qwen3-vl:4b (可选/备用) |
 
 ---
 
 ## 二、全局配置常量
 
+真实平台域名 / 具体 API 特征从本地 `config_platform.py` 读取（不进仓库），下方为 `config.py` 与 `config_platform.py` 中生效的配置汇总：
+
 ```
+# —— config.py 常量 ——
 MAX_PAGES = 100                    # 单课程最大页数，防止死循环
-MIN_DELAY_SEC = 5                  # 两次操作之间的最小间隔（秒）
+MIN_DELAY_SEC = 3                  # 两次操作之间的最小间隔（秒）
 MAX_DELAY_SEC = 15                 # 两次操作之间的最大间隔（秒）
-OCR_CONFIDENCE_THRESHOLD = 0.7     # OCR 置信度低于此值触发 VLM 兜底
-VLM_CONFIDENCE_THRESHOLD = 0.4     # VLM 置信度低于此值拒绝执行（llava-phi3 小模型置信度偏低，适当放宽）
+VIDEO_POLL_INTERVAL_MS = 15000     # 视频"是否播完"的轮询间隔（毫秒）
+VIDEO_WAIT_TIMEOUT_MS = 1200000    # 视频等待播完总超时（20 分钟），超时转人工
+CLICK_JITTER_PX = 3                # 点击落点中心附近的随机偏移（CSS 像素）
+ENABLE_JS_CLICK_FALLBACK = True    # 真实输入点不中时，是否用 JS element.click() 兜底（iframe 课程页必需）
+PROGRESS_REQUEST_GRACE_MS = 1200   # 点击后无进度请求时，多久回退到 URL/截图变化判断
+
+OCR_CONFIDENCE_THRESHOLD = 0.6     # OCR 置信度低于此值不再作为候选（字距大时置信度被拉低，放宽到 0.6）
+VLM_CONFIDENCE_THRESHOLD = 0.4     # VLM click 决策置信度低于此值拒绝执行（小模型置信度普遍偏低）
 MAX_CLICKS_PER_RUN = 300           # 单次运行最大点击次数
-ESC_KEY = "Escape"                 # 紧急停止热键
-ALLOWED_DOMAINS = ["<平台域名>", "localhost", "127.0.0.1"]   # 真实域名在本地 config_platform.py 配置，不进仓库
-QUESTION_KEYWORDS = ["单选", "多选", "判断", "问答", "题目", "哪些", "下列", "以下", "哪项"]
-END_TEXTS = ["已完成", "学习完成", "课程完成", "结束"]   # 课程完成判定文本
+MAX_RELOAD_COUNT = 2               # 自动刷新上限（当前主循环已不再触发 reload，保留配置）
+ENABLE_VLM = True                  # 是否启用 VLM；False 时所有"思考"页直接转人工
+ESC_KEY = "Escape"                 # 紧急停止热键（说明用；实际由 Ctrl+C 触发 KeyboardInterrupt）
+
+QUESTION_KEYWORDS = ["单选", "多选", "判断", "问答", "题目", "哪些", "下列", "哪项"]
+
+# 目标按钮匹配类别：start -> next -> submit -> guide_click
 TARGET_BUTTONS = {
-    "start": ["开始学习", "继续学习", "进入课程"],
+    "start": ["开始学习", "继续学习", "进入课程", "点击开始"],
     "next":  ["下一页", "下一题", "下一步", "继续", "下一节", "下一章"],
     "submit":["提交", "确定", "确认"],
+    "guide_click": ["点击了解", "点击查看", "点击进入", "点击学习", "点击打开", "点击播放"],
 }
+GUIDE_CLICK_PREFIX = "点击"         # guide_click 放宽：OCR 文字"以'点击'开头"即视为引导按钮
+
 NEXT_BUTTON_CLASS_HINTS = ["next-btn", "next", "btn-next"]  # 翻页按钮 DOM class 特征
-MAX_RELOAD_COUNT = 2                 # 单次运行自动刷新上限（防封号）
-COURSE_DETAIL_URL_MARK = "/course/detail"  # 详情页 URL 特征，用于"往回跳即结束"
+
+END_TEXTS = ["课程的学习已完成", "学习完成", "课程完成", "结束"]  # 结束正文（不用裸"已完成"）
+
+# 无 VLM 模式的"返回"按钮保底（反诈案例页等纯展示页）
+ENABLE_BACK_FALLBACK = True
+BACK_BUTTON_KEYWORDS = ["返回"]
+BACK_BUTTON_Y_RATIO = 0.4          # "返回"的 y 必须大于 视口高度 * 0.4（视口下半部分）
+
 BROWSER_CHANNEL = "msedge"
 VIEWPORT_WIDTH = 414               # H5 课程页只有中间一小块，用手机竖屏消除两侧留白
 VIEWPORT_HEIGHT = 896
@@ -42,12 +63,20 @@ IS_MOBILE = True
 USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 15_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.7 Mobile/15E148 Safari/604.1"
 VLM_IMAGE_WIDTH = 414              # 与 VIEWPORT 一致，不再做双尺度缩放/坐标换算
 VLM_IMAGE_HEIGHT = 896
-OLLAMA_BASE_URL = "http://localhost:11434"   # Ollama 服务地址
-OLLAMA_MODEL = "llava-phi3"                 # 视觉模型名
-VLM_TIMEOUT = 60                            # VLM 单次推理超时（秒）
-PROFILE_DIR = "./edge_profile"              # 持久化登录态的用户数据目录（避免每次重新登录）
-TARGET_URL = "https://<平台域名>/"   # 默认主页；真实值在本地 config_platform.py
-LOG_DIR = "./logs"                          # 日志与截图输出目录
+OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_MODEL = "qwen3-vl:4b"       # 视觉模型名
+VLM_TIMEOUT = 60                   # VLM 单次推理超时（秒）
+PROFILE_DIR = "./edge_profile"     # 持久化登录态的用户数据目录
+LOG_DIR = "./logs"                 # 日志与截图输出目录
+
+# —— config_platform.py（本地，不进仓库）——
+PLATFORM_DOMAIN = "<平台域名>"
+TARGET_URL = "https://<平台域名>/"
+ALLOWED_DOMAINS = ["<平台域名>", "localhost", "127.0.0.1"]
+COURSE_DETAIL_URL_MARK = "/course/detail"   # 详情页 URL 特征，用于"往回跳即结束"与列表页判断
+COURSE_FINISH_URL_MARK = "/wk/comment"      # 完成/结束页 URL 特征（视频播完/课程学完自动跳转）
+COURSE_FINISHED_TEXT = "课程的学习已完成"     # 结束页固定正文，用于严格匹配判定结束
+PROGRESS_API_MARKS = [...]                  # "推进生效"的 API 特征（翻页/答题提交），可空
 ```
 
 ---
@@ -56,67 +85,78 @@ LOG_DIR = "./logs"                          # 日志与截图输出目录
 
 ### 模块 1：BrowserController（浏览器控制器）
 
-**职责**：封装 Playwright 的所有浏览器操作，提供截图、导航、点击、等待等原子操作。
+**职责**：封装 Playwright 的所有浏览器操作，提供截图、导航、点击、等待、视频检测、进度验证等原子操作。核心原则：**DOM 只做无副作用观察（读可见元素、边界），实际操作统一走浏览器输入层；JS 合成点击仅作 iframe 兜底**。
 
-**类方法定义：**
+**主要方法：**
 
 ```
 class BrowserController:
 
-    init(channel="msedge", headless=False, viewport_width=414, viewport_height=896,
-         user_agent=<iPhone Safari 移动端 UA>, device_scale_factor=1, is_mobile=True):
-        # 启动 Edge 浏览器实例
-        # 设置视口为手机竖屏 414x896（消除 H5 页面两侧留白，让 OCR/VLM 只关注课程卡片区域）
-        # deviceScaleFactor 必须为 1，否则有头模式截图闪动
-        # 注入 iPhone Safari UA，强制课程平台 H5 渲染成手机端布局
-        # headed 模式下通过 CDP 调整外层窗口大小，避免窗口仍保持 1920x1080
+    __init__(channel=None, headless=False, viewport_width=None, viewport_height=None, use_stealth=True):
+        # 启动 Edge（launch_persistent_context 复用 edge_profile 登录态）
+        # 设置手机竖屏视口 414x896 + iPhone UA + 移动端 touch 支持
+        # deviceScaleFactor 必须为 1（否则有头模式截图闪动）
+        # 未安装 playwright-stealth 时自动跳过指纹伪装
         # 返回 self
 
+    set_logger(logger):
+        # 注入 ActionLogger，让 click 阶段的命中/保底诊断也写入 action_log.jsonl
+
     navigate(url):
-        # 打开指定 URL
-        # 等待页面加载完成（networkidle 状态）
-        # 返回 page 对象
+        # 打开 URL（networkidle 失败回退 domcontentloaded，最多重试 3 轮），返回 page
 
     reload():
-        # 刷新当前页（保留登录态），用于死循环分级降级恢复
-        # 返回是否成功
+        # 刷新当前页（保留登录态）。当前主循环已不再调用（遗留方法）
 
     screenshot(full_page=False):
-        # 截取当前页面截图，返回 PIL.Image
-        # 同时保存为 debug_page_{timestamp}.png，并把路径记录到 self.last_screenshot_path
-        # （供日志台账关联截图）
+        # 截图返回 PIL.Image，同时保存 debug_page_{timestamp}.png 并记录 last_screenshot_path
 
     click(x, y):
-        # 点击的核心：以 OCR 坐标为入口，用 DOM 反查真实可点击元素并点击。
-        # 1. _human_move(x, y)：贝塞尔曲线拟人化移动鼠标（视觉像真人）
-        # 2. 判断 elementFromPoint 命中的是主文档元素还是 iframe：
-        #    - 命中 iframe：切到对应 frame，在 iframe 内部重新 elementFromPoint 定位
-        #    - 命中普通元素：直接在主文档定位
-        # 3. 向上找可点击祖先（a/button/input/label/select），派发 touch + click
-        # 4. 回退：用 page.touchscreen.tap / mouse.click 按坐标真实点击
+        # 以 OCR/DOM 给出的坐标为入口，执行一次浏览器输入层点击：
+        # 1. 坐标加 CLICK_JITTER_PX 随机偏移
+        # 2. _human_move：贝塞尔曲线拟人化移动鼠标
+        # 3. _log_click_target：elementFromPoint 只读查询命中元素并打印（iframe 内切 frame 查）
+        # 4. _real_click：移动端 touch+mouse 双发（真实移动端触摸本就产生 touch+合成 mouse）
+        # 5. ENABLE_JS_CLICK_FALLBACK 开启时 _js_click 追加 JS element.click() 兜底（切 frame）
         # 返回 True/False
 
     find_text_element_center(keywords):
-        # DOM 兜底：在主文档可见文本中找关键词，返回中心坐标（过滤屏幕外隐藏元素）
-        # 当 OCR 匹配不到按钮时使用
+        # DOM 兜底：在可见文本节点/元素中找关键词，返回中心坐标（过滤屏幕外隐藏元素，从下到上取最靠下）
 
     find_next_button():
-        # 按 NEXT_BUTTON_CLASS_HINTS 里的 class（next-btn/next）跨 iframe 定位翻页按钮
-        # 解决"下一页/继续/下一步"文字变化但 class 恒定的情况
+        # 按 NEXT_BUTTON_CLASS_HINTS 跨 iframe 定位翻页按钮，只认"活动页(.page-active/.page.active)内、
+        # 可见、未遮挡、未禁用"的元素；返回 (x, y) 主文档坐标
 
     detect_video():
-        # 跨 iframe 检测 <video> 的 paused/playing 状态
-        # 用于识别"视频播放器页"（播放按钮是图标 OCR 识别不到）
+        # 跨 iframe 检测"可见 + 有真实内容"的 <video>（过滤隐藏/占位/视口外/空壳视频）
+        # 返回 has_video / paused / ended / playing / duration / currentTime / readyState
 
     try_play_video():
-        # 只观察常见播放按钮位置，再通过浏览器输入层点击并读取播放状态
-        # 多数浏览器禁止无手势自动播放，可能失败，此时提醒用户手动点播放
+        # 收集全部可见播放控件候选（含 video 本体），逐个点击试错，轮询最多 3 秒确认 playing
+
+    wait_for_video_end(poll_interval_ms=15000, timeout_ms=None, logger=None):
+        # 轮询等待视频播完：每 15 秒检测一次并截图进日志，直到 ended / 视频消失 / 出现翻页按钮
+        # 返回 video_ended / video_gone / next_available / timeout
 
     wait(ms):
         # 等待指定毫秒数
 
     wait_for_network_idle(timeout=30000):
         # 等待所有网络请求完成，超时返回 False
+
+    wait_for_progress(timeout_ms=120000, prev_url=None):
+        # 等待"推进"信号（人工介入后判断页面是否变化）：
+        # 信号 1 = 命中 PROGRESS_API_MARKS 且请求+响应都出现；信号 2 = URL 变化；信号 3 = 用户按 Enter 唤醒
+
+    read_key():
+        # 非阻塞读取一个按键（Windows msvcrt），供"暂停/继续(p)"与"人工唤醒(Enter)"共用
+
+    images_changed(img1, img2, threshold=8.0):
+        # 降采样 48x48 比较灰度差，判断页面内容是否显著变化（点击验证的兜底信号）
+
+    click_and_verify(x, y, before_image=None, prev_url=None, timeout_ms=6000):
+        # 点击并验证"是否真的推进"：验证顺序 API(请求+响应) > URL 变化 > 截图内容变化
+        # 返回 (changed: bool, why: str)
 
     get_current_url():
         # 返回当前页面 URL 字符串
@@ -134,177 +174,111 @@ class BrowserController:
 
 **职责**：封装 PaddleOCR 的文字检测与识别，输出"文字内容 + 坐标 + 置信度"。
 
-**类方法定义：**
+**主要方法：**
 
 ```
 class OCREngine:
 
-    init(use_gpu=True, lang="ch", show_log=False):
-        # 初始化 PaddleOCR
-        # use_gpu=True 启用 RTX 3060 加速
-        # lang="ch" 使用中文模型
-        # 首次运行自动下载检测模型和识别模型
+    __init__(use_gpu=True, lang="ch", show_log=False):
+        # 延迟导入 PaddleOCR，依次尝试 指定模式 -> CPU -> 最小参数，兼容不同版本
         # 返回 self
 
     recognize(image):
-        # 输入：PIL.Image 或 numpy array
-        # 执行 OCR 推理
-        # 返回格式：
-        # [
-        #   {
-        #     "text": "开始学习",
-        #     "bbox": [[x1,y1], [x2,y2], [x3,y3], [x4,y4]],  # 四点坐标
-        #     "confidence": 0.97
-        #   },
-        #   ...
-        # ]
-        # 如果识别失败返回空列表 []
+        # 输入 PIL.Image / numpy；先 2 倍放大再识别（小字更准），GPU 失败自动降级 CPU 重试
+        # 返回 [{text, bbox, confidence}, ...]，识别失败返回 []
 
-    filter_by_keywords(ocr_results, keywords):
-        # 输入：OCR 结果列表 + 关键词列表
-        # 对每条 OCR 结果，检查 text 是否包含任一关键词（模糊匹配）
-        # 返回匹配到的结果列表，按置信度降序排列
+    compact_text(text):
+        # 去掉文本内所有空白（OCR 字距大时会插空格，如"继  续"），供匹配统一使用
+
+    filter_by_keywords(ocr_results, keywords, prefix=None):
+        # 模糊匹配（text 包含关键词），匹配前去空白、排除否定形式（"不"+关键词）
+        # prefix 额外命中"以 prefix 开头"的文字（如"点击翻转"以"点击"开头）
+        # 按 y 坐标降序返回（从下到上，推进按钮通常在页面底部）
 
     locate_by_text(ocr_results, target_text):
-        # 输入：OCR 结果列表 + VLM 给出的目标文字
-        # 忽略空格后做双向包含匹配，返回最佳匹配（含 bbox），找不到返回 None
-        # 用于 VLM 决策后的"文字反查坐标"，避免 VLM 直接输出坐标定位不准
+        # VLM 给出目标文字后反查 bbox；双方去空白后做双向包含匹配，返回最佳匹配或 None
 
     get_center_point(bbox):
-        # 输入：四点坐标 [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
-        # 返回中心点 (center_x, center_y)
-        # center_x = (x1 + x2 + x3 + x4) / 4
-        # center_y = (y1 + y2 + y3 + y4) / 4
+        # 四点坐标 -> 中心点 (center_x, center_y)
 ```
 
 ---
 
 ### 模块 3：DecisionEngine（决策引擎）
 
-**职责**：根据 OCR 识别结果，匹配目标按钮并计算点击坐标。按优先级依次尝试：关键词匹配 -> VLM 兜底。
+**职责**：根据 OCR 结果与页面 URL 决策下一步动作。核心策略：**合并按钮候选池（类别优先、同类从下到上）+ 结束/题目检测 + VLM 兜底（输出候选队列）+ 返回按钮保底**。候选队列按来源区分：OCR 关键词候选（`source=ocr`）、DOM 可见翻页元素（`source=dom`，由 main.py 优先注入）、VLM 语义推理候选（`source=vlm`）。
 
-**类方法定义：**
+**主要方法：**
 
 ```
 class DecisionEngine:
 
-    init(ocr_engine, vlm_client, config):
-        # 注入 OCR 引擎和 VLM 客户端
-        # 加载全局配置
+    __init__(ocr_engine, vlm_client, config):
+        # 注入 OCR / VLM / 配置；vlm_ready 由 main.py 启动时健康检查写入
         # 返回 self
 
     decide(screenshot, ocr_results, page_url):
-        # 核心决策函数。按以下优先级决策（注意：结束检测最优先，翻页按钮优先于题目检测）：
-        #
-        # 步骤 0：结束检测 —— 命中 END_TEXTS（已完成/学习完成…）直接 terminate
-        #
-        # 步骤 1：优先匹配"推进进度"按钮（start/next）
-        #   学习内容页最明确的信号。必须放在题目检测之前，
-        #   否则内容页正文里的"选择/哪些"等词会被误判成题目页。
-        #
-        # 步骤 2：题目检测 —— 没有翻页按钮时，命中 QUESTION_KEYWORDS 才走 VLM
-        #   VLM 只负责"大脑"决策（判断该点哪个选项），不输出坐标；
-        #   返回 action + target_text，再由 OCR 反查 bbox 得到精确坐标。
-        #
-        # 步骤 3：submit 按钮（提交/确认/确定）—— 非题目页的确认按钮
-        #
-        # 步骤 4：无目标 —— 返回 wait
+        # 核心决策函数（产出 OCR 来源候选队列）：
+        # 步骤 0：COURSE_FINISHED_TEXT 严格短语匹配（如"课程的学习已完成"）→ terminate（优先于按钮）
+        # 步骤 1：合并 start/next/submit/guide_click 为候选池（类别优先、同类从下到上，去重），source=ocr
+        #   最高类别是 start/next → 直接 click（跳过结束/题目检测，保持"下一页优先于结束/题目"语义）
+        #   最高类别是 submit/guide_click → 先做结束检测、题目检测（题目页"提交"必须先走 VLM 读题）
+        # 步骤 2：无按钮候选时的结束检测（END_TEXTS）
+        # 步骤 3：无按钮候选时的题目检测（QUESTION_KEYWORDS → VLM 读题作答）
+        # 步骤 4：无 VLM 保底——ENABLE_BACK_FALLBACK 且详情页且"返回"在视口下半部分 → click 返回（source=ocr）
+        # 步骤 5：OCR 空 → wait（登录页/未渲染）；否则 wait（未匹配到任何目标）
 
-    _call_vlm_fallback(screenshot, ocr_results):
-        # 调用本地 VLM 进行兜底决策。
-        #
-        # 1. 截图保存：当前视口已是手机竖屏 414x896，无需再缩到 1280x720；
-        #    如尺寸不同则做等比缩放，保证坐标和 OCR 为同一坐标系。
-        # 2. 把 OCR 结果拼接成带编号的文字列表作为 prompt 上下文
-        # 3. 构造 prompt（见上方步骤 4），要求 VLM 只输出 target_text，禁止输出坐标
-        # 4. 发送 POST 请求到 http://localhost:11434/api/chat
-        #    model: llava-phi3
-        #    messages: [user: prompt + 截图base64]
-        #    format: "json"
-        #    temperature: 0.1
-        #    num_predict: 512
-        # 5. 等待响应（超时 60 秒）
-        # 6. 从响应文本中解析 JSON（提取 action, target_text, confidence）
-        # 7. 校验 action 白名单 / confidence 阈值
-        # 8. action == "click" 时：
-        #    调用 ocr_engine.locate_by_text(ocr_results, target_text) 反查 bbox
-        #    找不到 -> 返回 {"action": "error", "reason": "OCR未定位到目标文字"}
-        #    找到 -> 计算中心点返回 {"action": "click", "x": cx, "y": cy, ...}
-        # 9. 返回解析后的决策
+    _collect_button_candidates(ocr_results, groups, limit=5):
+        # 合并多类别候选：类别优先（groups 顺序）、同类从下到上；同一坐标只保留一次
+        # guide_click 额外用 GUIDE_CLICK_PREFIX 前缀放宽
 
     _build_candidates(matched, limit=3):
-        # 把 OCR 匹配结果转成候选点击坐标列表（按置信度降序，最多 limit 个）。
-        # 用于"误匹配时点一个无反应就换下一个命中位置"的多候选试错。
-        # 例如正文"找辅导员确认"误命中"确认"时，仍保留真正的"下一页"候选，逐个试错。
+        # OCR 匹配结果 -> 候选点击坐标列表（过滤低置信度，最多 limit 个），用于多候选试错
 
-    semantic_fallback(screenshot, ocr_results, page_url):
-        # 语义兜底：OCR 匹配不到标准翻页按钮（下一页/继续）时，
-        # 让 VLM 判断页面上是否存在"能推进课程进度"的可点击元素。
-        # 针对"看看有哪些新型诈骗""点击词云查看""知识卡片"这类引导语/图片按钮。
-        # 与题目兜底使用不同的 prompt（VLM_NAV_RULES），只输出 click/need_human 两种动作。
-        # vlm_ready=False 时直接返回 need_human（不发起任何网络请求）。
-        # 注意：此方法由 main 循环在"连续 wait 未匹配 + DOM 兜底也找不到 + 无视频"时调用，
-        #      不在 decide() 内部自动触发，避免过度调用拖慢主循环。
+    _call_vlm_fallback(screenshot, ocr_results, page_url=""):
+        # 题目页 VLM 兜底（读题作答）；vlm_ready=False 直接转 need_human
+
+    semantic_fallback(screenshot, ocr_results, page_url=""):
+        # 语义兜底：让 VLM 判断"推进按钮"（引导语/图片按钮）；只输出 click/need_human
+
+    _vlm_query(screenshot, ocr_results, page_url, prompt_template):
+        # 截图缩放保存 -> 构造 prompt（携带截图 + OCR 文字）-> 调 VLM -> 解析 targets 队列
+        # -> 逐个反查 OCR 坐标构造 candidates（source=vlm），主循环按序试错
 ```
 
 ---
 
 ### 模块 4：SafetySandbox（安全沙箱）
 
-**职责**：在每次操作执行前进行安全校验，所有操作必须通过沙箱才能执行。这是防止 AI 瞎搞的核心防线。
+**职责**：在每次操作执行前做安全校验。频率/坐标/次数校验在"真正点击前"由主循环单独调用，避免等待循环被误拦截。
 
-**类方法定义：**
+**主要方法：**
 
 ```
 class SafetySandbox:
 
-    init(config):
-        # 注入全局配置
-        # 初始化操作计数器 = 0
-        # 初始化上次操作时间戳 = 0
-        # 初始化历史截图列表（用于重复检测，最多保留 5 张）
+    __init__(config):
+        # 注入配置，初始化操作计数器 / 上次操作时间戳 / 历史截图列表
         # 返回 self
 
     validate_url(current_url):
-        # 域名白名单校验。
-        # 1. 提取 current_url 的域名部分
-        # 2. 检查域名是否在 ALLOWED_DOMAINS 中
-        # 3. 如果不在 -> 返回 (False, "URL偏离白名单: xxx")
-        # 4. 如果在 -> 返回 (True, "")
+        # 域名白名单校验，偏离返回 (False, reason)
 
     validate_coordinates(x, y, viewport_width, viewport_height):
-        # 坐标边界校验。
-        # 1. 检查 0 < x < viewport_width
-        # 2. 检查 0 < y < viewport_height
-        # 3. 如果任一条件不满足 -> 返回 (False, "坐标越界: (x, y)")
-        # 4. 如果全部通过 -> 返回 (True, "")
+        # 坐标边界校验（0 < x < width 且 0 < y < height）
 
     validate_rate_limit():
-        # 操作频率限制校验。
-        # 1. 计算当前时间 - 上次操作时间戳
-        # 2. 如果间隔 < MIN_DELAY_SEC -> 返回 (False, "操作过于频繁")
-        # 3. 如果间隔 >= MAX_DELAY_SEC -> 记录警告（可能之前卡住了）
-        # 4. 更新上次操作时间戳 = 当前时间
-        # 5. 返回 (True, "")
+        # 操作频率校验（间隔 < MIN_DELAY_SEC 拦截；每次通过都更新时间戳）
 
     validate_operation_count():
-        # 操作上限校验。
-        # 1. 操作计数器 +1
-        # 2. 如果计数器 > MAX_CLICKS_PER_RUN -> 返回 (False, "超过最大操作次数")
-        # 3. 返回 (True, f"操作次数: {计数器}/{MAX_CLICKS_PER_RUN}")
+        # 操作上限校验（> MAX_CLICKS_PER_RUN 拦截）
 
-    validate_no_repeat(screenshot_hash):
-        # 重复操作检测。
-        # 1. 将当前截图的 hash 与历史截图列表对比
-        # 2. 如果连续 3 次点击后截图相似度 > 95%（hash 相同）
-        #    -> 返回 (False, "连续操作后页面无变化，可能陷入死循环")
-        # 3. 将当前 hash 加入历史列表（保留最近 5 个）
-        # 4. 返回 (True, "")
+    check_all(page):
+        # 每次循环只做 URL 白名单校验（S1）；其余校验由主循环在点击前单独调用
 
-    check_all(page, screenshot):
-        # 执行全部校验。按顺序调用以上所有方法。
-        # 任一校验失败 -> 立即返回 (False, failure_reason)
-        # 全部通过 -> 返回 (True, "")
+    validate_no_repeat(screenshot_hash) / hash_image(image):
+        # 遗留方法：当前主循环的"重复检测"已改由 click_and_verify 里的 images_changed 实现，
+        # 这两个方法不再被调用
 ```
 
 ---
@@ -313,53 +287,25 @@ class SafetySandbox:
 
 **职责**：封装与本地 Ollama 的 VLM 通信。
 
-**类方法定义：**
+**主要方法：**
 
 ```
 class VLMClient:
 
-    init(base_url="http://localhost:11434", model="llava-phi3", timeout=60):
-        # 存储 Ollama 地址和模型名
-        # timeout 设为 60 秒（VLM 推理较慢）
-        # 返回 self
+    __init__(base_url=None, model=None, timeout=None):
+        # 默认 base_url=http://localhost:11434、model=qwen3-vl:4b、timeout=60
 
     check_health():
-        # 检查 VLM 服务是否可用。
-        # 1. GET http://localhost:11434/api/tags
-        # 2. 检查返回的模型列表是否包含 self.model
-        # 3. 返回 True/False
+        # GET /api/tags，检查模型列表是否包含 self.model，返回 True/False
 
     ask(screenshot_path, prompt):
-        # 发送截图到 VLM 获取决策。
-        # 1. 读取截图文件，转为 base64 字符串
-        # 2. 构造请求体：
-        #    {
-        #      "model": "llava-phi3",
-        #      "messages": [
-        #        {
-        #          "role": "user",
-        #          "content": prompt,
-        #          "images": [base64_string]
-        #        }
-        #      ],
-        #      "stream": false,
-        #      "format": "json",
-        #      "options": {
-        #        "temperature": 0.1,
-        #        "num_predict": 512
-        #      }
-        #    }
-        # 3. POST 到 http://localhost:11434/api/chat
-        # 4. 超时 60 秒
-        # 5. 返回 response.json()["message"]["content"]（纯文本）
+        # 读截图转 base64，POST /api/chat 返回纯文本。
+        # 请求同时携带截图（images 字段）与 OCR 文字上下文（prompt），即 VLM 能看到实际画面。
+        # qwen3 系列：顶层 think=False 关闭思考；已知怪癖 content 为空时回退 message.thinking
 
     parse_decision(response_text):
-        # 从 VLM 返回的文本中解析 JSON 决策。
-        # 1. 在 response_text 中查找 JSON 代码块（```json ... ``` 或 ``` ... ```）
-        # 2. 提取 JSON 内容并解析
-        # 3. 校验必需字段：action (string), confidence (float)
-        # 4. 如果 action 是 "click"，额外校验 target_text 非空（VLM 不输出坐标）
-        # 5. 返回解析后的 dict，解析失败返回 {"action": "error", "reason": "JSON解析失败"}
+        # 从返回文本中解析 JSON 决策；校验 action/confidence 字段；click 时校验 targets 非空
+        #（兼容旧字段 target_text，统一归一化为 targets 候选队列）；解析失败返回 {"action": "error"}
 ```
 
 ---
@@ -368,35 +314,29 @@ class VLMClient:
 
 **职责**：记录每一步操作的完整信息，写入 JSONL 文件用于审计和调试。
 
-**类方法定义：**
-
 ```
 class ActionLogger:
 
-    init(log_file="./logs/action_log.jsonl"):
-        # 确保 logs/ 目录存在
-        # 打开 log_file 用于追加写入
-        # 返回 self
+    __init__(log_file):
+        # 确保目录存在，打开文件追加写入
 
     log(step, action, details):
-        # 写入一条操作日志。
-        # 日志格式（每行一个 JSON）：
-        # {
-        #   "timestamp": "2026-08-21T10:30:00.000Z",
-        #   "step": 1,
-        #   "action": "click",
-        #   "page_url": "https://<平台域名>/...",
-        #   "details": {
-        #     "target": "开始学习",
-        #     "x": 495,
-        #     "y": 635,
-        #     "confidence": 0.97
-        #   }
-        # }
-        # 1. 构造日志 dict
-        # 2. 序列化为 JSON 字符串
-        # 3. 追加写入 log_file，换行
-        # 4. 同时打印到控制台（stdout）
+        # 写入一条 JSON 日志（timestamp/step/action/page_url/details），并打印到控制台
+```
+
+---
+
+### 模块 7：FlowStateMachine（工作流状态机）
+
+文件：[flow_state.py](flow_state.py)。显式记录观察、决策、操作、验证与升级阶段，检查非法状态跳转并输出可审计的状态记录。
+
+```
+class FlowState(str, Enum):
+    BOOT / OBSERVE / DECIDE / ACT / VERIFY / WAIT / VIDEO / VLM_REASONING / HUMAN / COMPLETE / ERROR
+
+class FlowStateMachine:
+    transition(next_state, reason):
+        # 校验合法跳转（非法跳转抛 RuntimeError），状态变化用分隔线显眼输出
 ```
 
 ---
@@ -404,177 +344,115 @@ class ActionLogger:
 ## 四、核心工作流（主循环）
 
 ```
-主函数 main(course_url, enable_vlm=True):
+main(course_url, enable_vlm=True):
 
-    # 1. 初始化所有模块
-    browser = BrowserController(channel="msedge", headless=False)
-    ocr = OCREngine(use_gpu=True)
-    vlm = VLMClient()
-    decision = DecisionEngine(ocr, vlm, config)
-    sandbox = SafetySandbox(config)
-    logger = ActionLogger()
+    # 1. 初始化模块
+    browser / ocr / vlm / decision / sandbox / logger / flow(FlowStateMachine)
 
     # 1.1 VLM 健康检查（enable_vlm 且 config.ENABLE_VLM 时）
-    vlm_ready = vlm.check_health()   # 不可用则自动降级"无 VLM 模式"，思考页直接转人工
+    vlm_ready = vlm.check_health()   # 不可用自动降级"无 VLM 模式"，思考页直接转人工
     decision.vlm_ready = vlm_ready
 
     # 2. 打开课程页面 + 登录页等待
     page = browser.navigate(course_url)
     if "login" in page.url.lower():
-        # 登录页：等待用户手动登录，不进主循环（避免反复截图导致页面闪动）
-        while "login" in page.url.lower():
-            browser.wait(5000)
+        等待用户手动登录（不进主循环，避免登录页反复截图闪动）
 
     # 3. 主循环
-    page_count = 0
-    no_progress_count = 0        # 连续"点击无进展"计数，驱动分级降级
-    reload_count = 0             # 累计自动刷新次数（防封号）
-    consecutive_wait_count = 0   # 连续"未匹配"次数，驱动语义兜底
-    prev_url = ""
-
     while page_count < MAX_PAGES:
+        # 3.0 暂停控制：按 p 键切换暂停/继续
+        flow.transition(OBSERVE)
 
         # 3.0 检测 URL 自动跳转（平台课程完成/视频结束会跳页）
-        if prev_url and page.url != prev_url:
-            no_progress_count = 0
-            if _is_course_finished_jump(prev_url, page.url):
-                # 从详情页跳回列表页 → 本课完成 → 不退出，等待用户打开下一节
-                _wait_for_next_lesson(browser, prev_url)
-                continue
+        if prev_url and current_url != prev_url:
+            重置 no_progress_count / failed_candidates / consecutive_wait_count
+            if _is_course_finished_jump(prev_url, current_url):
+                # 详情页退回列表页 / 跳到完成页 URL → 判定本课完成 → 等用户打开下一节
+                _wait_for_next_lesson(browser, prev_url); continue
 
-        # 3.1 截图
-        screenshot = browser.screenshot()
+        # 3.1 截图 + 3.2 OCR（失败重试 1 次），逐条打印 OCR 并写日志
 
-        # 3.2 OCR 识别（失败重试 1 次）
-        ocr_results = ocr.recognize(screenshot)
-        if not ocr_results:
-            browser.wait(1000); ocr_results = ocr.recognize(screenshot)
+        # 3.3 决策（候选队列按来源区分：dom / ocr / vlm）
+        flow.transition(DECIDE, "根据 OCR 与 DOM 生成候选")
+        dom_next = browser.find_next_button()   # DOM：活动页可见可操作的 btn-next 优先级最高（source=dom）
+        if dom_next: decision_result = click(dom_next, source=dom)
+        else:        decision_result = decision.decide(screenshot, ocr_results, page.url)
+                     # OCR：关键词候选池（source=ocr）/ VLM：语义推理候选队列（source=vlm）
 
-        # 3.3 决策（结束 > start/next > 题目VLM > submit > wait）
-        decision_result = decision.decide(screenshot, ocr_results, page.url)
-
-        # 3.3.1 DOM 兜底：OCR 空 / wait / error 时，读 DOM 可见文字 + next-btn class 定位
-        # 3.3.2 语义兜底：连续 2 次 wait 未匹配 + DOM 也找不到 + 无视频时，VLM 判断推进按钮；
-        #            列表页（非 /course/detail）直接 need_human，不走语义兜底（防 VLM 幻觉）
+        # 3.3.1 DOM 兜底：OCR 空 / wait / error 时，读可见文字 + next-btn class 定位
+        # 3.3.2 语义兜底：连续 >=3 次"未匹配"且非列表页且无视频时，VLM 判断推进按钮
+        # 3.3.3 统一人工门禁：非 VLM 产生的 need_human，VLM 可用时先 _vlm_before_human 推理
 
         # 3.4 安全校验（URL 白名单 S1，偏离即终止）
 
-        # 3.5 显式状态机执行：
-        #   OBSERVE → DECIDE → ACT → VERIFY；一轮只操作一个候选，失败后重新观察
-        #   VERIFY 以“匹配请求发出 + 收到响应”为首要成功信号，URL/截图变化为普通交互兜底
-        #   wait    → 视频页只观察状态/可见播放控件，不调用 video.play()/element.click()
-        #   need_human → VLM 可用时必须先进入 VLM_REASONING，仍无法处理才 HUMAN
-        #   terminate  → _wait_for_next_lesson 等用户打开下一节
-        #
-        # 升级顺序：未失败候选 → 当前活动页可见 btn-next → VLM_REASONING → HUMAN
+        # 3.5 执行（一次观察只操作一个候选，失败后重新观察）
+        #   click    -> candidates 逐个 click_and_verify；无效则记 failed_candidates，
+        #               全部无效时走 VLM_REASONING，VLM 目标仍无效 -> HUMAN
+        #   wait     -> 视频页进入 VIDEO（try_play_video + wait_for_video_end）；否则 wait 5s
+        #   need_human -> HUMAN（wait_for_progress 监听 API/URL/Enter 自动继续）
+        #   terminate  -> COMPLETE -> _wait_for_next_lesson 等用户打开下一节
+        #   error      -> break
+        #   升级顺序：未失败候选 -> 活动页可见 btn-next -> VLM_REASONING -> HUMAN
 
         page_count += 1
 
-    # 4. 清理资源
-    browser.close()
-    logger.log(step=page_count, action="shutdown", details={"total_pages": page_count})
+    # 4. 清理：browser.close() + 写 shutdown 日志
 ```
 
 ---
 
 ## 五、VLM 兜底详细流程
 
-当 OCR 关键词匹配全部失败，且页面文本中包含题目关键词时，触发 VLM 兜底：
+当 OCR 关键词匹配不到标准按钮，且页面命中题目关键词（或语义兜底触发）时，走 VLM：
 
 ```
-_decision_engine._call_vlm_fallback(screenshot, ocr_results):
+_decision_engine._vlm_query(screenshot, ocr_results, page_url, prompt_template):
 
     1. 截图预处理：
-       - 当前视口已为手机竖屏 414x896（与 VIEWPORT 一致），不再缩放到 1280x720；
-         如尺寸不同则做等比缩放，保证 OCR 和 VLM 为同一坐标系。
+       - 视口已是 414x896，与 VLM_IMAGE_WIDTH/HEIGHT 一致，直接使用；
+         尺寸不同则等比缩放（以竖屏高为基准），保证 OCR/VLM 同一坐标系。
        - 保存为 ./logs/vlm_input_{timestamp}.png
 
-    2. 构造 OCR 文字上下文：
-       - 将 ocr_results 拼接为带编号文字列表，例如：
-         "1. 判断题
-          2. 下列哪项说法正确？
-          3. A. 选项一
-          4. B. 选项二
-          ..."
+    2. 构造 OCR 文字上下文：把 ocr_results 拼成带编号文字列表
 
-    3. 构造 prompt（VLM 只输出目标文字，不输出坐标）：
-       "你是一个网页课程学习助手。请根据页面截图和下方 OCR 识别出的文字，决定下一步操作。
-        【OCR 识别到的文字】...
-        请严格按照以下 JSON 格式输出决策：
-        {
-          "action": "click" 或 "wait" 或 "terminate",
-          "target_text": "要点击的目标文字（必须原样复制自 OCR 文字）",
-          "reason": "一句话说明理由",
-          "confidence": 0.0~1.0的浮点数
-        }
-        ..."
+    3. 构造 prompt：公共头(VLM_COMMON_HEAD) + JSON 格式约束 + 规则(VLM_QUESTION_RULES 或
+       VLM_NAV_RULES) + 公共尾(VLM_COMMON_TAIL)
+       - 题目兜底规则：优先点推进按钮；能确定答案则点正确选项；多选题一次把全部正确选项都放进 targets
+         拿不准/开放题 -> need_human；结束提示 -> terminate；否则 wait
+       - 语义兜底规则：只输出 click / need_human，判断页面上"能推进进度"的可点击元素
+       - targets 是一个按优先级排序的候选目标文字数组（脚本会逐个尝试，降低 VLM 调用次数）
 
-    4. 调用 VLM：
-       response_text = vlm.ask(screenshot_path, prompt)
+    4. 调用 VLM：response_text = vlm.ask(screenshot_path, prompt)
+       （请求同时携带截图 base64 图像 + OCR 文字上下文，VLM 能看到实际画面；qwen3-vl:4b，think=False）
 
-    5. 解析响应：
-       decision = vlm.parse_decision(response_text)
+    5. 解析响应：decision = vlm.parse_decision(response_text)
+       （click 时归一化为 targets 候选队列，兼容旧字段 target_text）
 
-    6. 安全校验：
-       - 检查 decision["action"] 是否在白名单 ["click", "wait", "terminate"]
-       - 检查 confidence >= VLM_CONFIDENCE_THRESHOLD
-       - 任一检查失败 -> 返回 {"action": "error", "reason": "VLM校验失败"}
+    6. 校验：action 白名单（click/wait/terminate/need_human）；只有 click 要求
+       confidence >= VLM_CONFIDENCE_THRESHOLD（need_human/terminate 不限制）
 
-    7. 反查坐标（核心：眼睛定位，大脑决策）：
-       - 如果 action 是 "click"：
-         - target_text = decision["target_text"]
-         - located = ocr_engine.locate_by_text(ocr_results, target_text)
-         - 找不到 -> 返回 {"action": "error", "reason": "OCR未定位到目标文字"}
-         - 找到 -> cx, cy = ocr_engine.get_center_point(located["bbox"])
+    7. 反查坐标（VLM 只给文字，坐标由 OCR 反查）：
+       - action == "click"：遍历 targets -> ocr_engine.locate_by_text 逐个反查 bbox -> 中心点
+       - 构造 candidates 候选队列（去重），第一个反查不到就试下一个；全部失败 -> error（主循环转 need_human）
 
-    8. 返回：
-       {"action": "click", "x": cx, "y": cy,
-        "target": located["text"], "confidence": decision["confidence"],
-        "reason": decision["reason"]}
-```
-
-### 语义兜底（第二套 VLM 提示词）
-
-当 OCR 匹配不到标准翻页按钮（下一页/继续/下一步）、DOM 兜底也找不到、且页面无视频时，触发语义兜底，让 VLM 判断页面上是否有"能推进课程进度"的可点击元素：
-
-```
-_decision_engine.semantic_fallback(screenshot, ocr_results, page_url):
-
-    1. 触发条件（main 循环内）：
-       - 连续 >= 2 次 wait 且 reason 含"未匹配"
-       - DOM 兜底（可见文字 + next-btn class）都找不到
-       - detect_video() 无视频
-       - 页面 URL 含 COURSE_DETAIL_URL_MARK（列表页不触发，直接 need_human，防 VLM 幻觉）
-
-    2. 使用独立的 prompt（VLM_NAV_RULES）：
-       - 只允许输出 click / need_human 两种 action（不需要 wait/terminate）
-       - 提示 VLM："这类元素通常是页面中靠下方、唯一明显的按钮或引导点击文字，
-         例如'点击xx查看xxxx''看看有哪些xxxx'"
-       - 纯内容展示页 → need_human，并让 VLM 说明对页面内容的理解
-
-    3. 返回 click 时：仍需通过 ocr_engine.locate_by_text 反查坐标（眼睛定位）。
-       反查失败 → need_human（不会输出错误坐标）。
-
-    4. 与题目兜底的关系：
-       - 题目兜底（VLM_QUESTION_RULES）：读题作答，输出 click/wait/terminate/need_human。
-       - 语义兜底（VLM_NAV_RULES）：找推进按钮，只输出 click/need_human。
-       - 两者共用公共开头/结尾（VLM_COMMON_HEAD / VLM_COMMON_TAIL），仅"决策规则"不同。
+    8. 返回：{"action": "click", "x": ..., "y": ..., "target": ...,
+              "candidates": [...], "confidence": ..., "source": "vlm"}
 ```
 
 ---
 
 ## 六、安全约束完整清单
 
-以下约束在代码中必须硬编码实现，禁止通过配置关闭：
+以下约束在代码中硬编码实现，禁止通过配置关闭：
 
 | 约束编号 | 约束名称 | 具体规则 | 违反时动作 |
 |---------|---------|---------|-----------|
 | S1 | 域名白名单 | page.url 的域名必须在 ALLOWED_DOMAINS 中 | 立即停止脚本 |
 | S2 | 坐标边界 | 点击坐标必须满足 0 < x < viewport_width 且 0 < y < viewport_height | 拒绝执行该次点击 |
-| S3 | 操作频率 | 两次操作间隔 >= MIN_DELAY_SEC (5秒) | 跳过本次操作，等待 |
+| S3 | 操作频率 | 两次操作间隔 >= MIN_DELAY_SEC (3秒) | 跳过本次操作，等待 |
 | S4 | 操作上限 | 单次运行点击次数 <= MAX_CLICKS_PER_RUN (300) | 终止脚本 |
-| S5 | 重复检测 | 点击后页面无变化（连续计数），走分级降级：加长等待 → DOM 重定位 → VLM 语义兜底 → reload（上限 MAX_RELOAD_COUNT）→ 人工介入 | 分级恢复，超限才停止 |
-| S6 | VLM 输出校验 | VLM 返回的 action 必须在白名单（click/wait/terminate/need_human），click 时必须给出 target_text 且能在 OCR 结果中定位到 | 拒绝执行，记录日志 |
+| S5 | 重复检测 | 点击后页面无变化（click_and_verify 返回 no_change），多候选逐个试错，全部无效转 VLM 推理，仍无效转人工 | 分级升级，超限才转人工 |
+| S6 | VLM 输出校验 | action 必须在白名单（click/wait/terminate/need_human），click 时必须给出 targets 候选队列且至少一个能在 OCR 结果中定位到 | 拒绝执行，记录日志 |
 | S7 | 禁止文件系统写入 | 脚本中不得出现 os.remove / shutil / subprocess / os.system | 代码审查时检查 |
 | S8 | 禁止外部导航 | 不得调用 page.goto() 跳转到白名单以外的 URL | 代码审查时检查 |
 | S9 | JS 执行仅限定位/点击 | page.evaluate/frame.evaluate 仅用于 DOM 定位与点击（elementFromPoint/click），不得执行任意未审核逻辑 | 代码审查时检查 |
@@ -586,56 +464,52 @@ _decision_engine.semantic_fallback(screenshot, ocr_results, page_url):
 
 | 异常类型 | 触发条件 | 处理策略 |
 |---------|---------|---------|
-| OCR 识别失败 | ocr.recognize() 返回空列表或抛出异常 | 重试 1 次，仍失败则进入 VLM 兜底 |
-| VLM 调用超时 | POST 请求超过 60 秒未响应 | 重试 1 次，仍超时则等待 5 秒后回到截图步骤 |
-| VLM JSON 解析失败 | 返回文本中无法提取有效 JSON | 将原始文本写入日志，等待 3 秒后重试 |
-| 网络请求失败 | page.goto() 或 wait_for_network_idle() 超时 | 重试 1 次，仍失败则记录错误并继续 |
-| 浏览器崩溃 | Playwright 抛出 ConnectionError | 记录错误，尝试重新 navigate 到当前 URL，最多重试 3 次 |
+| OCR 识别失败 | ocr.recognize() 返回空列表或抛出异常 | 重试 1 次，仍失败则进入 DOM 兜底 |
+| VLM 调用失败/超时 | POST 请求超时或抛异常 | 返回 error，主循环转 need_human（不反复重试） |
+| VLM JSON 解析失败 | 返回文本中无法提取有效 JSON | 返回 error，主循环转 need_human |
+| 网络请求失败 | page.goto() 或 wait_for_network_idle() 超时 | navigate 内部重试，仍失败则记录错误 |
+| 浏览器崩溃 | Playwright 抛出异常 | 记录错误，重新 navigate 到当前 URL，最多重试 3 次 |
 | 用户中断 | 用户按下 Ctrl+C | 捕获 KeyboardInterrupt，关闭浏览器，保存日志，正常退出 |
 
 ---
 
 ## 八、日志输出规范
 
-控制台日志格式（每行一条，带时间戳前缀）：
+控制台日志格式（每行一条，带前缀；状态机变化用分隔线突出显示）：
 
 ```
-[2026-08-21 10:30:00] [INFO] 启动脚本，课程URL: https://<平台域名>/...
-[2026-08-21 10:30:02] [INFO] 页面加载完成 | URL: https://<平台域名>/...
-[2026-08-21 10:30:02] [OCR] 识别到 12 个文本块
-[2026-08-21 10:30:02] [OCR] "开始学习" -> 坐标(480, 620) 置信度: 0.97
-[2026-08-21 10:30:02] [DECISION] 匹配到目标: "开始学习" @ (495, 635)
-[2026-08-21 10:30:02] [SANDBOX] 校验通过 | 操作次数: 1/300
-[2026-08-21 10:30:02] [CLICK] 已点击 (495, 635) | 目标: 开始学习
-[2026-08-21 10:30:07] [DELAY] 等待 6.5 秒模拟真人学习...
-[2026-08-21 10:30:13] [INFO] 页面加载完成 | URL: https://<平台域名>/...
-[2026-08-21 10:30:13] [OCR] 识别到 15 个文本块
-[2026-08-21 10:30:13] [OCR] "判断题" -> 坐标(300, 150) 置信度: 0.91
-[2026-08-21 10:30:13] [VLM] 检测到题目关键词，触发 VLM 兜底
-[2026-08-21 10:30:20] [VLM] 返回: action=click, target_text=选项B文字, confidence=0.88
-[2026-08-21 10:30:20] [OCR] 反查定位到"选项B文字" @ (450, 380)
-[2026-08-21 10:30:20] [SANDBOX] 坐标(450, 380)在屏幕范围内 OK
-[2026-08-21 10:30:20] [CLICK] 已点击 (450, 380) | 目标: 选项B文字
-...
-[2026-08-21 11:45:00] [INFO] 课程已完成 | 总页数: 42 | 总操作: 87
+[VLM] 检查 Ollama 服务（http://localhost:11434, 模型 qwen3-vl:4b）...
+[OCR] 1. "开始学习" @ (207, 620) 置信度: 0.97
+[候选] 本次点击候选 2 个（来源: ocr）:
+       1. "下一页" @ (207,720) 置信度: 0.95
+       2. "继续" @ (300,400) 置信度: 0.80
+======================================================================
+[状态 #3]  observe  ==>  decide
+  原因: 根据 OCR 与 DOM 生成候选
+======================================================================
+[CLICK] 命中元素 <BUTTON> cls='btn-next' (iframe 内) @ (207, 720)
+[网络] 已收到进度响应(翻页): HTTP 200
+[点击生效] 检测到 progress_response:200
 ```
+
+日志落盘：`logs/action_log.jsonl`（每步 JSON 行），`report.py` 生成 `logs/report.html` 可视化台账。
 
 ---
 
 ## 九、依赖安装清单
 
 ```
-# Python 依赖
-pip install playwright paddleocr paddlepaddle-gpu requests
+# Python 依赖（见 requirements.txt）
+pip install -r requirements.txt
 
 # Playwright 浏览器驱动（首次运行）
 playwright install msedge
 
-# 注意：PaddleOCR 首次运行会自动下载 ch_PP-OCRv4_det 和 ch_PP-OCRv4_rec 模型文件
+# 注意：PaddleOCR 首次运行会自动下载检测/识别模型
 
 # Ollama 模型（独立安装，不在 Python 依赖中）
 # 1. 下载安装 Ollama: https://ollama.com
-# 2. 拉取视觉模型: ollama pull llava-phi3
+# 2. 拉取视觉模型: ollama pull qwen3-vl:4b
 # 3. 启动服务: ollama serve（后台运行）
 ```
 
@@ -644,18 +518,27 @@ playwright install msedge
 ## 十、运行方式
 
 ```
-# 1. 确保 Ollama 服务正在运行（VLM 兜底需要；不需要 VLM 可跳过）
-# 2. 启动脚本，传入课程 URL
+# 1. 生成本地平台配置（只留本地、不上云）
+python setup_local.py
+#    （或手动：copy config_platform.example.py config_platform.py 后填写）
+
+# 2. 确保 Ollama 服务正在运行（VLM 兜底需要；不需要可跳过）
+
+# 3. 启动脚本（不传 URL 时默认打开 config_platform.py 中的主页）
+python main.py
 python main.py "https://<平台域名>/课程地址"
 
-# 跳过 VLM（不调用 Ollama），所有需要"思考"的页面直接转人工介入：
+# 跳过 VLM（不调用 Ollama），所有需要"思考"的页面直接转人工：
 python main.py "https://<平台域名>/课程地址" --no-vlm
 # 或设置 config.py: ENABLE_VLM = False
 
-# 3. 脚本启动后会打开 Edge 浏览器
-# 4. 如果页面需要登录，请手动在浏览器中完成登录
-# 5. 登录完成后，脚本会自动开始执行
-# 6. 按 Ctrl+C 可随时停止脚本
+# 4. 脚本启动后打开 Edge 浏览器；如需登录请手动完成，登录后自动继续
+# 5. 按 p 暂停/继续，按 Ctrl+C 停止
+
+# 本地回归测试（不连真实平台，自动起服务器跑 test_page.html 全流程）
+python test_flow.py
+python test_flow.py --no-vlm
+python test_flow.py --port 8000
 
 # 生成可视化台账（跑完后，产物 logs/report.html）
 python report.py
@@ -671,7 +554,7 @@ python report.py
 | OCR 识别 | 按钮文字识别置信度 >= 0.8 时能正确点击 |
 | VLM 兜底 | OCR 失败时 VLM 能正确决策目标文字，并通过 OCR 反查定位后点击 |
 | 安全校验 | URL 偏离时立即停止，坐标越界时拒绝执行 |
-| 操作频率 | 两次操作间隔在 5~15 秒之间 |
+| 操作频率 | 两次操作间隔在 3~15 秒之间 |
 | 日志完整 | action_log.jsonl 中每步操作都有记录 |
 | 紧急停止 | 按 Ctrl+C 后浏览器在 3 秒内关闭 |
 | 无异常写入 | 脚本不写入任何非日志文件到磁盘 |
@@ -682,12 +565,14 @@ python report.py
 
 本项目从 0 到跑通经历了大量迭代，关键技术决策、踩坑记录、点击定位演进史详见 **[DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md)**（开发记录）。
 
-本 PRD 描述的是「产品需求 + 目标行为」，具体实现细节（如 iframe 定位、视频页处理、分级降级等）以下面三个辅助文件为准：
+本 PRD 描述的是「产品需求 + 目标行为」，具体实现细节（iframe 定位、视频页处理、候选池、状态机等）以下面文件为准：
 
 | 文件 | 作用 |
 |------|------|
 | `DEVELOPMENT_LOG.md` | 踩坑记录、技术演进史、配置说明 |
 | `debug_ocr.py` | 单独对某张截图跑 OCR（多尺度 + 亮度检测），排查"识别不到"问题 |
-| `report.py` | 解析 action_log.jsonl 生成 `logs/report.html` 可视化台账（统计概览 + 困难样本 + 截图） |
+| `debug_api_listen.py` | 监听翻页/答题 API 请求，验证推进信号 |
+| `report.py` | 解析 action_log.jsonl 生成 `logs/report.html` 可视化台账 |
+| `test_flow.py` / `test_page.html` / `test_interaction.py` | 本地回归测试（不连真实平台） |
 
-核心定位分工：**OCR 当眼睛**（识别文字、给大致坐标、判断页面类型），**DOM 当手**（elementFromPoint 反查真实元素、切 iframe 精确定位并点击），**VLM 当大脑**（读题做题、判断拿不准）。
+核心定位分工：**OCR 提供文字与坐标**（识别文字、给大致坐标、判断页面类型、供候选队列与反查定位），**DOM 提供可见/可点击元素与精确定位**（elementFromPoint 反查真实元素、切 iframe），**VLM 看截图并做语义判断**（同时接收截图图像与 OCR 文字，输出候选目标文字，坐标仍由 OCR 反查）。

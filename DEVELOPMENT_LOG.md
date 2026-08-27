@@ -8,32 +8,44 @@
 
 已完成并验证：
 1. **登录 → 选课 → 详情页自动翻页 → 答题 → 视频 → 完成** 全链路可跑通。
-2. **iframe 内点击**：课程内容在全屏 iframe 里，已用 frame API 切进内部定位并点击（此前多次失败的根因）。
-3. **API 监听**：`page.on("request")` 捕获本地配置的推进接口特征（翻页 / 答题提交，见 `config_platform.py` 的 `PROGRESS_API_MARKS`），用于判断"推进（翻页、提交）是否生效"。已用 `debug_api_listen.py` 实测通过。
-4. **VLM 双提示词**：题目作答 + 语义兜底（找推进按钮），抽取公共部分、加位置提示。
-5. **分级降级恢复**：等待 → DOM 重定位 → VLM 语义兜底 → reload（最后手段）→ 人工（监听 API 自动继续）。
-6. **VLM 健康检查 + 跳过机制**：启动时 `check_health()`，`--no-vlm` / `ENABLE_VLM=False` 可跳过。
-7. **可视化台账**：`report.py` 生成 `report.html`，含困难样本（含 VLM 返回内容）。
+2. **iframe 内点击**：课程内容在全屏 iframe 里，已用 frame API 切进内部定位并点击，并保留 JS 合成点击兜底（此前多次失败的根因）。
+3. **按钮候选池合并**：start/next/submit/guide_click 合并成一个候选池，类别优先、同类从下到上，多候选逐个试错（commit `503f5ec`）。
+4. **API 监听**：`page.on("request"/"response")` 捕获本地配置的推进接口特征（见 `config_platform.py` 的 `PROGRESS_API_MARKS`），判断"推进是否生效"。
+5. **VLM 双提示词**：题目作答 + 语义兜底（找推进按钮），共用公共头尾、各自规则。
+6. **显式状态机**：`flow_state.py` 记录 观察 → 决策 → 操作 → 验证 → VLM → 视频 → 人工 → 完成，检查非法跳转并显眼输出（commit `8a55880`）。
+7. **视频页处理**：`detect_video` 只认"可见 + 有真实内容"的 video；`try_play_video` 候选试错；`wait_for_video_end` 轮询等播完（commit `10089cf`）。
+8. **课程结束判定**：结束页固定正文（`COURSE_FINISHED_TEXT`）+ 完成页 URL 特征（`COURSE_FINISH_URL_MARK`），不靠裸"已完成"（commit `5ac627b`）。
+9. **无 VLM 保底**：底部"返回"按钮保底（`ENABLE_BACK_FALLBACK`）+ guide_click 前缀放宽（`GUIDE_CLICK_PREFIX`）。
+10. **VLM 健康检查 + 跳过机制**：启动时 `check_health()`，`--no-vlm` / `ENABLE_VLM=False` 可跳过。
+11. **可视化台账**：`report.py` 生成 `report.html`，含困难样本（含 VLM 返回内容）。
+12. **本地回归测试**：`test_flow.py` + `test_page.html` + `test_interaction.py`（不连真实平台）。
 
 仍需验证/打磨：
 - 知识卡片类交互页（逐个点"请点击查看"）VLM 的定位准确度。
-- VLM 语义兜底在小模型 llava-phi3 上的稳定命中率。
-- `images_changed` 降采样阈值（当前 8.0）在真实页面的适配。
+- VLM 语义兜底在 qwen3-vl:4b 上的稳定命中率。
+- `images_changed` 降采样阈值（当前 8.0）在真实页面的适配（卡片翻转等"内容变但灰度差小"可能误判 no_change）。
+
 
 ## 二、核心架构决策
 
-1、**VLM 不输出坐标，只输出目标文字**：VLM 返回 `action + target_text`，再由 OCR 结果反查 `target_text` 的 bbox 得到精确坐标。避免视觉模型定位不准。
+1、**VLM 看截图、只输出目标文字队列（不输出坐标）**：VLM 请求同时携带截图（base64 图像）与 OCR 文字上下文，所以 VLM 是"看到实际画面"的，而不是只靠 OCR 文本；但它只返回 `action + targets`（候选目标文字列表，按优先级排序），坐标再由 OCR 结果逐个反查 bbox 得到，主循环按序试错。这样既避免视觉模型坐标定位不准，又能一次给出多个备选、降低 VLM 调用次数。
 
-2、**决策分层**（[decision_engine.py](file:///c:/prog_file/code_with_vsc/browser_controller/decision_engine.py)）：
-- ps：为什么不是按照”步骤 0 结束检测：命中 `END_TEXTS`（已完成/学习完成…）→ `terminate`。”提前结束课程，是因为遇到了一节课，参考案例17。
-- 步骤 1 翻页按钮：`start → next` 的 OCR 关键词匹配。**优先于结束检测与题目检测**——阶段性完成页"恭喜你，你已完成了本微课"+"下一页"会优先点"下一页"，而不是误判成课程结束。
-- 步骤 2 结束检测：无可点翻页按钮时，命中 `END_TEXTS`（课程的学习已完成…）→ `terminate`。结束页正文是"课程的学习已完成"，按钮"返回列表"可能与其它页面内容冲突，不用按钮文字判定。
-- 步骤 3 题目检测：命中 `QUESTION_KEYWORDS`（多选/判断/哪些…）→ VLM 做题。
-- 步骤 4 提交按钮：`submit` 关键词匹配。
-- 步骤 5 引导点击：`guide_click`（点击了解/点击查看/点击进入…）——标准翻页/提交都没有时，点页面底部的"点击 xxx"引导元素（反诈案例页常见）。排 submit 之后、wait 之前，是无 VLM 模式下推进的最后机会。
-- 步骤 6 兜底：OCR 空则 wait，非题目无按钮则 wait。
+2、**决策分层（当前版：合并候选池）**（[decision_engine.py](file:///c:/prog_file/code_with_vsc/browser_controller/decision_engine.py)）：
+- ps：为什么不是按照「步骤 0 结束检测：命中 `END_TEXTS` → `terminate`」提前结束课程，是因为遇到了一节课，参考案例17。
+- 步骤 0 结束页固定正文：`COURSE_FINISHED_TEXT` 严格短语匹配（如"课程的学习已完成"）→ `terminate`，**优先于按钮匹配**（结束页上的"继续学习"会命中 start，若排按钮之后会跳过结束检测，坑 17 的反面）。
+- 步骤 1 按钮候选池：`start/next/submit/guide_click` 合并成一个候选池，**类别优先（start→next→submit→guide_click）、同类从下到上**、同一坐标去重。
+  - 最高类别是 `start/next` → 直接点击（跳过结束/题目检测，保持"下一页优先于结束/题目"语义）。
+  - 最高类别是 `submit/guide_click` → 先做结束检测、题目检测（题目页"提交"必须先走 VLM 读题）。
+- 步骤 2 结束检测：无按钮候选时命中 `END_TEXTS`（课程的学习已完成…）→ `terminate`。
+- 步骤 3 题目检测：命中 `QUESTION_KEYWORDS` → VLM 做题。
+- 步骤 4 返回保底：无 VLM 时，`ENABLE_BACK_FALLBACK` 且详情页且"返回"在视口下半部分 → `click`（反诈案例页常见）。
+- 步骤 5 兜底：OCR 空则 wait，非题目无按钮则 wait。
 
 3、**移动端视口**：`VIEWPORT 414x896` + iPhone UA，消除 H5 页面两侧留白，OCR 只关注课程卡片区域，识别率更高。
+
+4、**显式状态机**（[flow_state.py](file:///c:/prog_file/code_with_vsc/browser_controller/flow_state.py)）：用 `FlowStateMachine` 记录观察 → 决策 → 操作 → 验证 → VLM → 视频 → 人工 → 完成，非法跳转直接抛错，状态变化用分隔线显眼输出，便于在终端定位"脚本当前走到哪一步"。
+
+5、**升级路径统一走 VLM 再人工**：任何"视觉候选全部无效 / need_human"的情况，只要 VLM 可用，都先进入 `VLM_REASONING` 做一次语义推理，仍无法处理才转 `HUMAN`（`_vlm_before_human`）。
 
 ## 三、踩过的坑（按时间顺序）
 
@@ -197,9 +209,9 @@
 | 3 | 定位元素中心 + `page.mouse/touchscreen` 穿透点击 | 移动端模拟下穿透仍失效 |
 | 4 | 命中 iframe 就用原始坐标穿透 | iframe 内外缩放导致坐标对不上 |
 | 5 | frame API 切进 iframe 内部 `elementFromPoint` + `.click()` | 能推进，但属于 JavaScript 直接激活 |
-| 6 | **DOM/OCR 只给坐标，Playwright 输入层单次 tap/click** | ✅ 当前方案，不再伪造 TouchEvent 或调用 element.click() |
+| 6 | **DOM/OCR 只给坐标，Playwright 输入层 tap/click + JS element.click() 兜底（切 frame）** | ✅ 当前方案：输入层点击优先，iframe 穿透失效时 JS 兜底 |
 
-**结论**：DOM 用于无副作用观察，操作统一走浏览器输入层；移动模式只发送一次 touch，桌面模式只发送一次 mouse。截图像素、CSS 视口、iframe 与 DPR 仍需保持一致。
+**结论**：DOM 用于无副作用观察，操作以浏览器输入层为主——移动模式发送 touch+mouse（真实移动端触摸本就产生 touch + 合成 mouse），桌面模式只发送 mouse。JS `element.click()`（isTrusted=false，可能被风控识别）仅作 iframe 课程页穿透失效时的兜底，由 `ENABLE_JS_CLICK_FALLBACK` 开关控制。截图像素、CSS 视口、iframe 与 DPR 仍需保持一致。
 
 ## 五、关键配置（config.py）
 
@@ -207,11 +219,20 @@
 |---|---|---|
 | `VIEWPORT_WIDTH/HEIGHT` | 414 / 896 | 手机竖屏，消除留白 |
 | `DEVICE_SCALE_FACTOR` | 1 | 必须为 1，否则截图闪动 |
-| `VLM_CONFIDENCE_THRESHOLD` | 0.4 | llava-phi3 小模型置信度偏低，放宽 |
-| `MAX_RELOAD_COUNT` | 2 | 自动刷新上限，防封号 |
+| `MIN_DELAY_SEC` | 3 | 两次操作最小间隔（秒） |
+| `OCR_CONFIDENCE_THRESHOLD` | 0.6 | 字距大时置信度被拉低，放宽到 0.6 |
+| `VLM_CONFIDENCE_THRESHOLD` | 0.4 | qwen3-vl:4b 小模型置信度偏低，放宽 |
+| `OLLAMA_MODEL` | qwen3-vl:4b | 默认视觉模型 |
+| `ENABLE_JS_CLICK_FALLBACK` | True | iframe 课程页输入层穿透失效，JS click 兜底必需 |
+| `ENABLE_BACK_FALLBACK` / `BACK_BUTTON_Y_RATIO` | True / 0.4 | 无 VLM 时底部"返回"保底 |
+| `GUIDE_CLICK_PREFIX` | 点击 | guide_click 前缀放宽 |
+| `VIDEO_POLL_INTERVAL_MS` / `VIDEO_WAIT_TIMEOUT_MS` | 15000 / 1200000 | 视频轮询间隔 / 等待播完总超时 |
 | `COURSE_DETAIL_URL_MARK` | `/course/detail` | 详情页 URL 特征，用于「往回跳即结束」 |
+| `COURSE_FINISH_URL_MARK` / `COURSE_FINISHED_TEXT` | `/wk/comment` / 课程的学习已完成 | 结束页 URL 特征 + 固定正文（本地 config_platform.py） |
 | `NEXT_BUTTON_CLASS_HINTS` | next-btn/next/btn-next | 翻页按钮 class 特征 |
 | `TARGET_BUTTONS["guide_click"]` | 点击了解/查看/进入… | 引导语按钮（反诈案例页），短语匹配防"引诱点击"误命中 |
+
+> 注：`MAX_RELOAD_COUNT`（=2）与 `browser.reload()` 仍保留在代码中，但当前主循环已不再触发 reload——点击无效时改为"多候选试错 → VLM 推理 → 人工"，避免 reload 重置课程交互进度。
 
 ## 六、后续优化方向
 
@@ -220,23 +241,22 @@
 2、**监听网络 API**（已实现）：`wait_for_progress()` 与 `click_and_verify()` 同时观察匹配请求和响应；两者都出现才记为 `progress_response`。不解析、不构造 next 正文，消息仍由页面自身生成。
 
 3、**可视化统计台账**（已实现）：`python report.py` 解析 `action_log.jsonl` 生成 `logs/report.html`，展示统计概览 + 困难样本（带截图）。困难样本判定：
-   - `vlm_failed`（**VLM 校验后依然失败**，附 VLM 原始返回内容）—— 最核心的困难样本，见下方「困难样本定义」。
    - `click_no_effect`（点击无效）
    - `blocked`（被沙箱拦截）
    - 连续 ≥2 次 `wait` 且 reason 含"未匹配到任何目标"（OCR 识别到文字但匹配不到按钮）
    - 按「识别文字」去重，相似样本取一张。
+   - 注：早期 `vlm_failed` 事件已不再由 main.py 写入（VLM 失败现统一转 need_human / click_no_effect），report.py 中对应的 `vlm_failed` 分支为遗留逻辑。
 
 ## 六·五、困难样本定义（明确口径）
 
 **困难样本 = 自动化链路（OCR → DOM → VLM）都无法独立推进、需要人工或二次分析介入的页面。**
 
 判定优先级（满足任一即为困难样本）：
-1. **`vlm_failed`**：经过 VLM 校验（语义兜底/题目作答）后，仍无法成功推进（VLM 给了错误目标 / 点击无效 / VLM 直接放弃）。**必须记录 VLM 的实际返回内容**，供复盘"VLM 到底看成了什么"。
-2. **`click_no_effect`**：点击后页面/API/截图均无变化。
-3. **`blocked`**：被安全沙箱拦截（坐标越界/死循环/频率）。
-4. **连续 ≥2 次 `wait` 未匹配**：OCR 识别到文字但反复匹配不到任何按钮（换行/图标/语义引导按钮）。
+1. **`click_no_effect`**：点击后页面/API/截图均无变化。
+2. **`blocked`**：被安全沙箱拦截（坐标越界/死循环/频率）。
+3. **连续 ≥2 次 `wait` 未匹配**：OCR 识别到文字但反复匹配不到任何按钮（换行/图标/语义引导按钮）。
 
-日志落点：`vlm_failed` 事件由 [main.py](file:///c:/prog_file/code_with_vsc/browser_controller/main.py) 分级降级第 3 级记录，字段含 `vlm_raw`（VLM 原始返回）+ `ocr_texts`（当页 OCR 文本）。`report.py` 会单独展示这些样本的 VLM 返回内容。
+日志落点：上述事件分别由 [main.py](file:///c:/prog_file/code_with_vsc/browser_controller/main.py) 以 `click_no_effect` / `blocked` / `wait`（reason 含"未匹配"）写入 `action_log.jsonl`；`report.py` 读取这些事件生成困难样本。VLM 返回内容仍可通过 `decision.last_vlm_raw` 与 `[VLM] 原始返回` 终端日志复盘。
 
 ## 七、仍未解决的难点（值得持续记录）
 
@@ -254,7 +274,7 @@
 
 ## 九、本地回归测试（test_page.html + test_flow.py）
 
-`test_page.html` 按难度递增模拟：文字按钮 → 可见的无文字 `img.btn-next` → 完成四张卡片后才显示的图片按钮 → OCR 陷阱 → 题目页。正常翻页会向本地 `/progress/next` 发请求并收到 204 响应。
+`test_page.html` 按难度递增模拟 11 段流程：文字按钮（含顶部"返回"干扰）→ 可见无文字 `img.btn-next` → 完成四张知识卡片后才显示的图片按钮 → 反诈案例 OCR 陷阱（"再三确认"/"点击了解经过"）→ 字间距过大 / 按钮文字换行（OCR 鲁棒性）→ 多选题 / 单选题答错重答（底部"返回"重答）→ 完成页。正常翻页会向本地 `/progress/next` 发请求并收到 204 响应。
 
 快速回归浏览器输入层与状态机：
 
@@ -270,7 +290,7 @@
 
 1、`test_flow.py` 自动完成「起服务器 → 打开 http://127.0.0.1:<port>/test_page.html → 跑完整流程 → 关服务器」。
 
-2、测试页第 5 页"多选题"：有 Ollama 时 VLM 自动作答；无 VLM 时会停住等人工作答，脚本检测到翻页后自动继续（与生产逻辑一致）。
+2、测试页第 8 页"多选题" / 第 9 页"单选题"：有 Ollama 时 VLM 自动作答；无 VLM 时会停住等人工作答，脚本检测到翻页后自动继续（与生产逻辑一致）。
 
 3、走到「已完成」页即判定流程跑通、自动退出；Ctrl+C 随时停止，服务器自动关闭。
 
