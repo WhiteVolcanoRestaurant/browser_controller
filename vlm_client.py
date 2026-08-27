@@ -38,11 +38,21 @@ class VLMClient:
             ],
             "stream": False,
             "format": "json",
-            "options": {"temperature": 0.1, "num_predict": 512},
+            "options": {"temperature": 0.1, "num_predict": 2048},
         }
+        # qwen3 系列默认开启 thinking：思考会烧光 num_predict、content 为空（done_reason=length）。
+        # 顶层 think=False 关闭思考（qwen3 专属参数，其它模型会被 Ollama 忽略）。
+        # 已知怪癖：qwen3-vl 在 think=False 时把答案放进 message.thinking 字段，content 为空，
+        # 所以下面读取时 content 为空就回退 thinking。
+        if "qwen3" in self.model.lower():
+            payload["think"] = False
         resp = requests.post(f"{self.base_url}/api/chat", json=payload, timeout=self.timeout)
         resp.raise_for_status()
-        return resp.json()["message"]["content"]
+        msg = resp.json()["message"]
+        content = msg.get("content") or ""
+        if not content:
+            content = msg.get("thinking") or ""
+        return content
 
     def parse_decision(self, response_text):
         # 从 VLM 返回文本中解析 JSON 决策，失败返回 error
