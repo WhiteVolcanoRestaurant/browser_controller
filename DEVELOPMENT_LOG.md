@@ -143,6 +143,25 @@
   3. `QUESTION_KEYWORDS` 移除"以下"：正文"只要做到以下几点就能防骗"含"以下"，会被误判成题目页（预先存在的问题，与本次同页暴露）。
   4. 验证：原日志页 → click "继  续"(307,719)。
 
+### 20、重构点击层删除 iframe 处理，回归坑 6，脚本完全无法推进
+- **现象**：master 在「重构点击层并校验进度响应」（5002467）之后，线上课程详情页
+  点击全部 `no_change`；日志 `命中元素 <IFRAME>` 后 `touch+mouse` 点不中；开启
+  JS 兜底后 `JS 保底点击 <DIV> cls='viewport'>`，点的是 iframe 父容器而非按钮。
+- **根因**：5002467 把 `click()` 从「命中 IFRAME → `_frame_at()` 切 frame →
+  `_CLICK_JS`（元素吸附 + `t.click()`）」改成了纯输入层 tap/click，一并删掉了
+  iframe 处理与兜底。而演进史阶段 3/4 早已验证：纯输入层在移动端模拟下穿透
+  iframe 失效。等于把坑 6 的解法整个删掉，重新踩回坑 6。
+- **解法**（browser_controller.py / config.py / main.py）：
+  1. `_js_click()` 与 `_log_click_target()` 命中 iframe 时先 `_frame_at()` 切进
+     frame，用内部坐标 `(x-ox, y-oy)` 再 `elementFromPoint` + `element.click()`。
+  2. 新增 `ENABLE_JS_CLICK_FALLBACK`（默认 True）：真实输入后追加 JS 合成 click 兜底，
+     否则 iframe 课程页无法推进。
+  3. `_real_click` 移动端恢复 touch+mouse 双发（真实移动端触摸本就产生 touch + 合成 mouse）。
+  4. 新增 `read_key()` 支持按 p 暂停/继续；命中/保底诊断写入 action_log.jsonl
+     （`click_hit` / `js_click`）。
+- **教训**：重构点击层时，坑 6 的 iframe 处理是「推进课程」的命脉，不能随
+  「DOM 无副作用观察 + 输入层点击」的抽象一并删掉；iframe 场景必须保留 frame API 切帧。
+
 ## 四、点击定位的演进史（重要经验）
 
 | 阶段 | 做法 | 结果 |

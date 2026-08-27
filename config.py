@@ -18,6 +18,13 @@ MAX_DELAY_SEC = 15
 # 偏移只用于避免机械地重复命中同一像素；最终坐标仍受视口边界和元素命中检查约束。
 CLICK_JITTER_PX = 3
 
+# 点击保底：真实浏览器输入（touch/mouse）点不中时，是否额外用 JS 合成 click
+# （element.click()）兜底。element.click() 是 isTrusted=false 的合成事件，
+# 可能被平台风控识别。默认开启：课程内容在 iframe 里，输入层穿透在移动端模拟下
+# 失效（见 DEVELOPMENT_LOG 坑6 / 点击定位演进史），必须靠 JS click 切进 iframe
+# 内部才能推进。若后续实现 frame 级 trusted 点击，可改回 False。
+ENABLE_JS_CLICK_FALLBACK = True
+
 # 点击后若短时间内没有出现进度请求，尽快回退到 URL/截图变化判断，
 # 避免普通卡片交互为等待一个不存在的 next 请求而停顿数秒。
 PROGRESS_REQUEST_GRACE_MS = 1200

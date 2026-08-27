@@ -41,7 +41,13 @@ class BrowserController:
         self._context = None
         self.page = None
         self.last_screenshot_path = None
+        self.logger = None  # 由 main.py 通过 set_logger 注入，用于把点击诊断写入日志台账
+        self.step = 0      # 当前 page_count，随主循环更新，供日志关联页次
         self._start()
+
+    def set_logger(self, logger):
+        # 注入 ActionLogger，使 click 阶段的命中/保底诊断也能写入 action_log.jsonl。
+        self.logger = logger
 
     def _start(self):
         # 持久化上下文：复用 edge_profile 登录态，无需每次重新登录
@@ -160,18 +166,99 @@ class BrowserController:
         tx = min(self.viewport_width - 1, max(1, x + random.uniform(-jitter, jitter)))
         ty = min(self.viewport_height - 1, max(1, y + random.uniform(-jitter, jitter)))
         self._human_move(tx, ty)
-        return self._real_click(tx, ty)
+        self._log_click_target(tx, ty)
+        ok = self._real_click(tx, ty)
+        if getattr(config, "ENABLE_JS_CLICK_FALLBACK", False):
+            self._js_click(tx, ty)
+        return ok
+
+    def _log_click_target(self, x, y):
+        # 只读诊断：点击前用 elementFromPoint 查一次坐标将命中的元素并打印。
+        # elementFromPoint 是纯只读查询，不派发事件、不修改页面、不发网络请求，
+        # 不会产生 isTrusted=false 的可疑痕迹，因此无风控风险。
+        js = """([x, y]) => {
+          const e = document.elementFromPoint(x, y);
+          if (!e) return null;
+          const text = (e.innerText || e.textContent || '').replace(/\\s+/g, ' ').trim();
+          return {
+            tag: e.tagName,
+            id: e.id || '',
+            cls: (typeof e.className === 'string' ? e.className : '').slice(0, 80),
+            text: text.slice(0, 40),
+          };
+        }"""
+        # 坐标落在 iframe 内时切到 frame 内部查询，才能看到 iframe 里真正的按钮而非 iframe 元素
+        frame, ox, oy = self._frame_at(x, y)
+        tx, ty = (x - ox, y - oy) if frame else (x, y)
+        try:
+            info = (frame if frame else self.page).evaluate(js, [tx, ty])
+        except Exception as e:
+            print(f"[CLICK] 命中元素查询失败: {e}")
+            return
+        if info:
+            print(f"[CLICK] 命中元素 <{info['tag']}> id={info['id']!r} "
+                  f"cls={info['cls']!r} text={info['text']!r} "
+                  f"{'(iframe 内)' if frame else ''} @ ({int(x)},{int(y)})")
+            if getattr(self, "logger", None):
+                getattr(self, "logger", None).log(getattr(self, "step", 0), "click_hit",
+                                {"x": int(x), "y": int(y), "hit": info,
+                                 "iframe": bool(frame)})
+        else:
+            print(f"[CLICK] 命中元素: (无) @ ({int(x)},{int(y)})")
+            if getattr(self, "logger", None):
+                getattr(self, "logger", None).log(getattr(self, "step", 0), "click_hit",
+                                {"x": int(x), "y": int(y), "hit": None})
+
+    def _js_click(self, x, y):
+        # 保底：用 JS element.click() 直接触发坐标处可点击元素的 click 事件。
+        # element.click() 是 isTrusted=false 的合成事件，可能被平台风控识别，
+        # 仅在 config.ENABLE_JS_CLICK_FALLBACK 开启时调用（验证/保底刷课进度用）。
+        js = """([x, y]) => {
+          let el = document.elementFromPoint(x, y);
+          if (!el) return {ok: false, reason: 'no_element'};
+          let t = el;
+          const CLICKABLE = ['A','BUTTON','INPUT','LABEL','SELECT','DIV','SPAN','IMG'];
+          while (t && t !== document.body && !CLICKABLE.includes(t.tagName)) {
+            t = t.parentElement;
+          }
+          if (!t || t === document.body) t = el;
+          try { t.click(); } catch (e) { return {ok: false, reason: String(e)}; }
+          return {ok: true, tag: t.tagName,
+                  cls: (typeof t.className === 'string' ? t.className : '').slice(0, 60)};
+        }"""
+        # 若坐标落在 iframe 内（平台课程页常见 page-iframe），必须切到 frame 内部、
+        # 用内部坐标定位点击，否则 elementFromPoint 只会命中 iframe 元素，
+        # 向上找祖先会错误地点到 iframe 的父容器（如 viewport div）。
+        frame, ox, oy = self._frame_at(x, y)
+        tx, ty = (x - ox, y - oy) if frame else (x, y)
+        try:
+            info = (frame if frame else self.page).evaluate(js, [tx, ty])
+        except Exception as e:
+            print(f"[CLICK] JS 保底点击异常: {e}")
+            if getattr(self, "logger", None):
+                getattr(self, "logger", None).log(
+                    getattr(self, "step", 0), "js_click",
+                    {"x": int(x), "y": int(y), "error": str(e)})
+            return False
+        print(f"[CLICK] JS 保底点击 <{info.get('tag')}> cls={info.get('cls')!r} "
+              f"ok={info.get('ok')} {'(iframe 内)' if frame else ''} @ ({int(x)},{int(y)})")
+        if getattr(self, "logger", None):
+            getattr(self, "logger", None).log(
+                getattr(self, "step", 0), "js_click",
+                {"x": int(x), "y": int(y), "info": info, "iframe": bool(frame)})
+        return bool(info and info.get("ok"))
 
     def _real_click(self, x, y):
-        # 每次只发送一种浏览器输入，避免移动端一次操作同时产生 touch 和 mouse 两套事件。
+        # 只用浏览器输入层派发真实（isTrusted=true）事件，不用 element.click()/dispatchEvent
+        # 这类 DOM 合成点击（isTrusted=false，易被风控识别）。
+        # 移动端真实触摸会产生 touch 事件 + 浏览器合成的 mouse/click 事件，
+        # 所以 touch 与 mouse 都要发，才能覆盖依赖任一事件类型的按钮，且不绑定具体平台。
         try:
             if self.is_mobile:
                 self.page.touchscreen.tap(x, y)
-                method = "touchscreen.tap"
-            else:
-                self.page.mouse.click(x, y, delay=random.randint(35, 95))
-                method = "mouse.click"
-            print(f"[CLICK] 浏览器输入 {method} @ ({int(x)},{int(y)})")
+            self.page.mouse.click(x, y, delay=random.randint(35, 95))
+            print(f"[CLICK] 浏览器输入 @ ({int(x)},{int(y)})"
+                  f"{' touch+mouse' if self.is_mobile else ' mouse'}")
             return True
         except Exception as e:
             print(f"[CLICK] 浏览器输入失败: {e}")
@@ -489,19 +576,21 @@ class BrowserController:
                 continue
         return None
 
-    def _user_enter_pressed(self):
-        # 非阻塞检测终端是否按下 Enter（Windows msvcrt）。
-        # 用于"等待用户手动操作"期间：平台可能不发进度 API、URL 也不变，
-        # 脚本干等超时太慢，用户按 Enter 即可立即唤醒重新识别页面内容。
+    def read_key(self):
+        # 非阻塞读取一个按键（Windows msvcrt），返回按键字节（如 b'p'、b'\r'）或 None。
+        # 供“暂停/继续”（p）与“人工唤醒”（Enter）共用，避免多处各自实现 msvcrt 逻辑。
         try:
             import msvcrt
             if msvcrt.kbhit():
-                ch = msvcrt.getch()
-                if ch in (b"\r", b"\n"):
-                    return True
+                return msvcrt.getch()
         except Exception:
             pass
-        return False
+        return None
+
+    def _user_enter_pressed(self):
+        # 非阻塞检测终端是否按下 Enter（用于“等待用户手动操作”期间的唤醒）。
+        ch = self.read_key()
+        return ch in (b"\r", b"\n")
 
     def wait_for_progress(self, timeout_ms=120000, prev_url=None):
         # 等待"翻页/推进"信号，用于判断人工介入后页面是否真的变了。

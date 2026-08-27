@@ -112,6 +112,7 @@ def main(course_url, enable_vlm=True):
     decision.vlm_ready = vlm_ready
     sandbox = SafetySandbox(config)
     logger = ActionLogger(os.path.join(config.LOG_DIR, "action_log.jsonl"))
+    browser.set_logger(logger)  # 让 click 阶段的命中/保底诊断也写入日志台账
     flow = FlowStateMachine()
 
     # 两个计数用途不同（正常跳转/页面变动时都会重置）：
@@ -138,6 +139,19 @@ def main(course_url, enable_vlm=True):
         # 3. 主循环
         while page_count < config.MAX_PAGES:
             try:
+                browser.step = page_count  # 让点击诊断日志能关联到当前页次
+                # 3.0 暂停控制：按 p 切换暂停/继续（不影响 Enter 唤醒等其它按键语义）
+                key = browser.read_key()
+                if key in (b"p", b"P"):
+                    paused = not paused
+                    print(f"\n[暂停] {'已暂停，按 p 继续' if paused else '已继续'}")
+                while paused:
+                    browser.wait(400)
+                    k = browser.read_key()
+                    if k in (b"p", b"P"):
+                        paused = False
+                        print("[暂停] 已继续")
+                        break
                 flow.transition(FlowState.OBSERVE, "开始新一轮页面观察")
                 # 3.0 检测页面 URL 是否自动跳转（真实平台课程完成/视频结束可能自动跳页）
                 current_url = page.url or ""

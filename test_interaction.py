@@ -63,19 +63,34 @@ class BrowserInteractionTests(unittest.TestCase):
         self.assertIsNotNone(found)
         self.assertEqual(found[1]["tag"], "IMG")
 
-    def test_browser_input_is_single_and_trusted(self):
-        self.page.set_content("""
-          <button id='target' style='width:160px;height:80px'>按钮</button>
-          <script>
-            window.clicks = [];
-            target.addEventListener('click', e => clicks.push(e.isTrusted));
-          </script>
-        """)
-        box = self.page.locator("#target").bounding_box()
-        self.assertTrue(self.controller.click(
-            box["x"] + box["width"] / 2,
-            box["y"] + box["height"] / 2))
-        self.assertEqual(self.page.evaluate("window.clicks"), [True])
+    def test_browser_input_is_trusted_touch_and_mouse(self):
+        # 点击必须走浏览器输入层（isTrusted=true），移动端 touch+mouse 双发，
+        # 覆盖依赖任一事件类型的按钮（DOM 合成点击 isTrusted=false 会被风控识别）。
+        # 本测试与 ENABLE_JS_CLICK_FALLBACK 无关，临时关闭该开关以验证纯可信输入。
+        old_fallback = config.ENABLE_JS_CLICK_FALLBACK
+        config.ENABLE_JS_CLICK_FALLBACK = False
+        try:
+            self.page.set_content("""
+              <button id='target' style='width:160px;height:80px'>按钮</button>
+              <script>
+                window.seen = [];
+                ['touchstart', 'mousedown', 'click'].forEach(function (t) {
+                  target.addEventListener(t, function (e) { seen.push([t, e.isTrusted]); });
+                });
+              </script>
+            """)
+            box = self.page.locator("#target").bounding_box()
+            self.assertTrue(self.controller.click(
+                box["x"] + box["width"] / 2,
+                box["y"] + box["height"] / 2))
+            seen = self.page.evaluate("window.seen")
+            kinds = [s[0] for s in seen]
+            self.assertTrue(all(s[1] for s in seen))
+            self.assertIn("touchstart", kinds)
+            self.assertIn("mousedown", kinds)
+            self.assertIn("click", kinds)
+        finally:
+            config.ENABLE_JS_CLICK_FALLBACK = old_fallback
 
     def test_progress_requires_request_and_response(self):
         old_marks = config.PROGRESS_API_MARKS
