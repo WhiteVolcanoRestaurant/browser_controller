@@ -154,60 +154,28 @@ class BrowserController:
         return Image.open(io.BytesIO(data))
 
     def click(self, x, y):
-        # 先做拟人化鼠标移动，再在正确的文档上下文里（iframe 内 / 主文档）
-        # 直接用 elementFromPoint 定位可点击祖先并派发 touch + click，
-        # 避免"拿到坐标再回主文档用 page.mouse 穿透 iframe"在移动端模拟下失效。
-        self._human_move(x, y)
-
-        # 先看主文档 elementFromPoint 命中什么
-        try:
-            hit = self.page.evaluate(
-                "([x,y]) => { const e = document.elementFromPoint(x,y); "
-                "return e ? e.tagName : null; }", [x, y])
-        except Exception:
-            hit = None
-
-        # 命中 iframe：切到 frame 内部上下文，直接对内部元素派发点击
-        if hit in ("IFRAME", "FRAME"):
-            frame, ox, oy = self._frame_at(x, y)
-            if frame:
-                try:
-                    info = frame.evaluate(self._CLICK_JS, [x - ox, y - oy])
-                except Exception as e:
-                    print(f"[CLICK] frame 内点击异常: {e}")
-                    info = None
-                if info and info.get("ok"):
-                    print(f"[CLICK] frame 内点击: 命中 {info['hit']} -> <{info['tag']}> "
-                          f"({info['w']}x{info['h']}) clicked={info.get('clicked')}")
-                    if info.get("clicked"):
-                        return True
-            # 回退：主文档坐标真实点击
-            return self._real_click(x, y)
-
-        # 主文档内：直接定位并派发点击
-        try:
-            info = self.page.evaluate(self._CLICK_JS, [x, y])
-        except Exception as e:
-            print(f"[CLICK] 点击异常: {e}")
-            return self._real_click(x, y)
-        if info and info.get("ok"):
-            print(f"[CLICK] 点击: 命中 {info['hit']} -> <{info['tag']}> "
-                  f"({info['w']}x{info['h']}) clicked={info.get('clicked')}")
-            if info.get("clicked"):
-                return True
-        return self._real_click(x, y)
+        # DOM/视觉只负责给出目标坐标；实际操作只走浏览器输入层。
+        # 不再 dispatchEvent / element.click()，避免脚本直接改变页面状态或绕过可见性流程。
+        jitter = max(0, int(getattr(config, "CLICK_JITTER_PX", 3)))
+        tx = min(self.viewport_width - 1, max(1, x + random.uniform(-jitter, jitter)))
+        ty = min(self.viewport_height - 1, max(1, y + random.uniform(-jitter, jitter)))
+        self._human_move(tx, ty)
+        return self._real_click(tx, ty)
 
     def _real_click(self, x, y):
-        # 回退：用 Playwright 真实输入点击（移动端 touch tap + mouse click）
-        ok = False
+        # 每次只发送一种浏览器输入，避免移动端一次操作同时产生 touch 和 mouse 两套事件。
         try:
             if self.is_mobile:
                 self.page.touchscreen.tap(x, y)
-            self.page.mouse.click(x, y)
-            ok = True
+                method = "touchscreen.tap"
+            else:
+                self.page.mouse.click(x, y, delay=random.randint(35, 95))
+                method = "mouse.click"
+            print(f"[CLICK] 浏览器输入 {method} @ ({int(x)},{int(y)})")
+            return True
         except Exception as e:
-            print(f"[CLICK] 真实点击失败: {e}")
-        return ok
+            print(f"[CLICK] 浏览器输入失败: {e}")
+            return False
 
     def _human_move(self, x, y):
         # 从视口随机起点，沿贝塞尔曲线移动到目标坐标（不点击）
@@ -225,44 +193,6 @@ class BrowserController:
                 pass
             self.page.wait_for_timeout(int(random.uniform(4, 12)))
         self.page.wait_for_timeout(int(random.uniform(50, 200)))
-
-    # 在给定文档上下文里，从 (x,y) 反查可点击祖先，派发 touch + click 并返回结果
-    _CLICK_JS = """(args) => {
-      const [x, y] = args;
-      const el = document.elementFromPoint(x, y);
-      if (!el) return {ok: false, reason: 'no_element'};
-      let t = el;
-      const CLICKABLE = ['A','BUTTON','INPUT','LABEL','SELECT'];
-      while (t && t !== document.body && !CLICKABLE.includes(t.tagName)) {
-        t = t.parentElement;
-      }
-      if (!t || t === document.body) t = el;
-      const r = t.getBoundingClientRect();
-      const cx = r.left + r.width / 2;
-      const cy = r.top + r.height / 2;
-      const fireTouch = (type) => {
-        try {
-          const touch = new Touch({identifier: 1, target: t, clientX: cx, clientY: cy});
-          const opts = {bubbles: true, cancelable: true, view: window};
-          if (type === 'touchstart') {
-            opts.touches = [touch]; opts.targetTouches = [touch]; opts.changedTouches = [touch];
-          } else {
-            opts.touches = []; opts.targetTouches = []; opts.changedTouches = [touch];
-          }
-          t.dispatchEvent(new TouchEvent(type, opts));
-        } catch (e) {}
-      };
-      fireTouch('touchstart');
-      fireTouch('touchend');
-      let clicked = false;
-      try { t.click(); clicked = true; } catch (e) {}
-      return {
-        ok: true, clicked: clicked,
-        tag: t.tagName, hit: el.tagName,
-        w: Math.round(r.width), h: Math.round(r.height),
-        cls: (typeof t.className === 'string' ? t.className : '').slice(0, 60)
-      };
-    }"""
 
     def _frame_at(self, x, y):
         # 找到覆盖 (x,y) 的 iframe 对应的 frame 和其左上角偏移 (ox, oy)
@@ -399,16 +329,25 @@ class BrowserController:
     def _find_by_class(self, hints):
         js = """(hints) => {
           const out = [];
-          const els = document.querySelectorAll('button, a, div, span, input');
+          const activeRoots = Array.from(document.querySelectorAll('.page-active, .page.active'));
+          const els = document.querySelectorAll('[class]');
           for (const el of els) {
             const cls = (typeof el.className === 'string' ? el.className : '');
-            if (!hints.some(h => cls.indexOf(h) !== -1)) continue;
+            if (!hints.some(h => el.classList && el.classList.contains(h))) continue;
+            if (activeRoots.length && !activeRoots.some(root => root === el || root.contains(el))) continue;
             const r = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
             if (r.width <= 0 || r.height <= 0) continue;
             if (r.top < 0 || r.left < 0 || r.top >= window.innerHeight || r.left >= window.innerWidth) continue;
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) <= 0.05) continue;
+            if (style.pointerEvents === 'none' || el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+            const cx = r.left + r.width / 2;
+            const cy = r.top + r.height / 2;
+            const hit = document.elementFromPoint(cx, cy);
+            if (!hit || !(hit === el || el.contains(hit) || hit.contains(el))) continue;
             out.push({
-              x: Math.round(r.left + r.width / 2),
-              y: Math.round(r.top + r.height / 2),
+              x: Math.round(cx),
+              y: Math.round(cy),
               cls: cls.slice(0, 50),
               w: Math.round(r.width), h: Math.round(r.height),
               tag: el.tagName
@@ -486,26 +425,26 @@ class BrowserController:
         return {"has_video": False, "paused": None, "playing": None}
 
     def try_play_video(self):
-        # 尝试点击视频播放按钮 / 调用 video.play()，返回播放后的状态。
-        # 多数浏览器禁止无用户手势自动播放，可能仍失败，此时需提醒用户手动点。
+        # 只观察可见播放控件的位置，再通过浏览器输入层点击；不调用 video.play()/element.click()。
         js = """() => {
-          const vids = Array.from(document.querySelectorAll('video'));
-          if (vids.length === 0) return {found: false, playing: false};
-          const v = vids[0];
-          // 点击常见播放按钮（vjs / 自定义 play 按钮）
           const btns = document.querySelectorAll(
             '[class*="play"], [class*="Play"], .vjs-big-play-button, [class*="btn-play"]');
           for (const b of btns) {
             const r = b.getBoundingClientRect();
-            if (r.width > 0 && r.height > 0) { try { b.click(); } catch (e) {} break; }
+            const s = getComputedStyle(b);
+            if (r.width > 0 && r.height > 0 && s.display !== 'none' &&
+                s.visibility !== 'hidden' && Number(s.opacity) > 0.05 &&
+                s.pointerEvents !== 'none') {
+              return {found: true, x: r.left + r.width / 2, y: r.top + r.height / 2};
+            }
           }
-          try { v.play(); } catch (e) {}
-          return {found: true, playing: !v.paused && !v.ended};
+          return {found: false};
         }"""
+        candidates = []
         try:
             r = self.page.evaluate(js)
             if r and r.get("found"):
-                return r
+                candidates.append((r["x"], r["y"]))
         except Exception:
             pass
         try:
@@ -520,8 +459,20 @@ class BrowserController:
             except Exception:
                 continue
             if r and r.get("found"):
-                return r
-        return {"found": False, "playing": False}
+                try:
+                    box = frame.frame_element().bounding_box() or {}
+                except Exception:
+                    box = {}
+                candidates.append((r["x"] + box.get("x", 0),
+                                   r["y"] + box.get("y", 0)))
+        if not candidates:
+            return {"found": False, "playing": False}
+        x, y = candidates[0]
+        if not self.click(x, y):
+            return {"found": True, "playing": False}
+        self.wait(600)
+        state = self.detect_video()
+        return {"found": True, "playing": bool(state.get("playing"))}
 
     def _matches_progress_api(self, url, post_data=""):
         # 用本地配置的 API 特征（config.PROGRESS_API_MARKS）判断请求是否属于"推进信号"。
@@ -559,25 +510,35 @@ class BrowserController:
         # 信号 3：用户按 Enter（平台不发 API、URL 不变时手动唤醒重新识别）
         # 用 page.on("request") 注册事件 + page.wait_for_timeout 驱动事件循环轮询。
         # （注意：Page 没有 wait_for_request 方法，之前误用导致监听完全失效）
-        self._progress_hit = False
+        self._progress_request = False
+        self._progress_response = False
 
         def _on_request(req):
             try:
                 url = req.url or ""
                 if self._matches_progress_api(url, req.post_data or ""):
-                    self._progress_hit = True
+                    self._progress_request = True
+            except Exception:
+                pass
+
+        def _on_response(resp):
+            try:
+                req = resp.request
+                if self._matches_progress_api(req.url or "", req.post_data or ""):
+                    self._progress_response = True
             except Exception:
                 pass
 
         try:
             self.page.on("request", _on_request)
+            self.page.on("response", _on_response)
         except Exception:
             pass
         deadline = time.time() + timeout_ms / 1000.0
         try:
             while time.time() < deadline:
-                if self._progress_hit:
-                    return True, "progress_api"
+                if self._progress_request and self._progress_response:
+                    return True, "progress_response"
                 if prev_url and (self.get_current_url() or "") != prev_url:
                     return True, "url_changed"
                 if self._user_enter_pressed():
@@ -589,6 +550,7 @@ class BrowserController:
         finally:
             try:
                 self.page.remove_listener("request", _on_request)
+                self.page.remove_listener("response", _on_response)
             except Exception:
                 pass
 
@@ -623,31 +585,55 @@ class BrowserController:
             return False
 
     def click_and_verify(self, x, y, before_image=None, prev_url=None, timeout_ms=6000):
-        # 点击并用 expect_request 包裹（监听在点击同时生效），验证是否推进。
-        # 关键：不能用"点击后再 wait_for_request"，否则请求已在监听注册前发出、会错过。
-        def _is_progress(req):
+        # 点击前同时监听匹配请求与响应。只有请求发出且收到响应，才记为 progress_response；
+        # 不解析/构造 next 消息正文，完整请求仍由页面自己的点击处理程序生成。
+        progress = {"request": False, "response": False, "status": None}
+
+        def _on_request(req):
             try:
                 url = req.url or ""
-                print(f"[网络] 请求: {url[:100]}")
                 name = self._matches_progress_api(url, req.post_data or "")
                 if name:
-                    print(f"[网络] -> 匹配进度信号({name})")
-                    return True
-                return False
-            except Exception as e:
-                print(f"[网络] 请求判断异常: {e}")
-                return False
+                    progress["request"] = True
+                    print(f"[网络] 已发出进度请求({name}): {url[:100]}")
+            except Exception:
+                pass
 
-        matched = False
+        def _on_response(resp):
+            try:
+                req = resp.request
+                name = self._matches_progress_api(req.url or "", req.post_data or "")
+                if name:
+                    progress["response"] = True
+                    progress["status"] = resp.status
+                    print(f"[网络] 已收到进度响应({name}): HTTP {resp.status}")
+            except Exception:
+                pass
+
         try:
-            with self.page.expect_request(_is_progress, timeout=timeout_ms):
-                self.click(x, y)
-            matched = True
+            self.page.on("request", _on_request)
+            self.page.on("response", _on_response)
         except Exception:
-            matched = False
-
-        if matched:
-            return True, "progress_api"
+            pass
+        try:
+            if not self.click(x, y):
+                return False, "input_failed"
+            started = time.time()
+            deadline = started + timeout_ms / 1000.0
+            grace = getattr(config, "PROGRESS_REQUEST_GRACE_MS", 1200) / 1000.0
+            while time.time() < deadline:
+                if progress["request"] and progress["response"]:
+                    return True, f"progress_response:{progress['status']}"
+                # 普通卡片点击不会产生 next 请求，短暂观察后尽快进入截图变化验证。
+                if not progress["request"] and time.time() - started >= grace:
+                    break
+                self.page.wait_for_timeout(100)
+        finally:
+            try:
+                self.page.remove_listener("request", _on_request)
+                self.page.remove_listener("response", _on_response)
+            except Exception:
+                pass
         # URL 变化兜底
         if prev_url and (self.get_current_url() or "") != prev_url:
             return True, "url_changed"
