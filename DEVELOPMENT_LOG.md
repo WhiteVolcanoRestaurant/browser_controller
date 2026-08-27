@@ -152,6 +152,14 @@
   2. `END_TEXTS` 去掉裸"已完成"，改为以正文"课程的学习已完成"为准（保留"学习完成/课程完成/结束"）。
   3. 验证：阶段性完成页 → click "下一页"(325,722)；结束页"课程的学习已完成"+返回列表 → terminate。
 
+### 19、课程结束页有"继续学习"按钮 → 结束判定被"翻页按钮优先"跳过（坑 17 的反面）
+- **现象**：视频课播完后 URL 从 `/course/detail` 跳到 `/wk/comment`（完成/评论页），OCR 识别到"课程的学习已完成"+"继续学习"+"下一课"+"返回列表"。脚本点了"继续学习"（no_change 无效），最后靠 VLM 点"返回列表"才切到下一课，全程没触发 terminate。
+- **根因**：坑 17 把"翻页按钮匹配"提到"结束检测"之前。完成页上的"继续学习"命中 start 关键词，`decide()` 直接 `return click`，跳过了"课程的学习已完成"的结束检测。
+- **解法**（[config_platform.py](file:///c:/prog_file/code_with_vsc/browser_controller/config_platform.py) / [config.py](file:///c:/prog_file/code_with_vsc/browser_controller/config.py) / [main.py](file:///c:/prog_file/code_with_vsc/browser_controller/main.py) / [decision_engine.py](file:///c:/prog_file/code_with_vsc/browser_controller/decision_engine.py)）：
+  1. `config_platform.py` 新增 `COURSE_FINISH_URL_MARK="/wk/comment"`（完成页 URL 特征）与 `COURSE_FINISHED_TEXT="课程的学习已完成"`（结束页固定正文）。
+  2. `_is_course_finished_jump()` 增加"跳到完成页 URL"也算结束（`reached_finish`）：视频播完自动跳转完成页即可触发 `completed`，不依赖 OCR。
+  3. `decide()` 步骤 0：`COURSE_FINISHED_TEXT` 严格短语匹配时直接 `terminate`（优先于按钮匹配）。坑 17 的阶段性完成页"你已完成了本微课"不含"课程的学习已完成"完整短语，不会被误伤。
+
 ### 18、OCR 字距大时在字间插空格（"继  续"）→ 匹配不到按钮
 - **现象**：真实日志（step 13）OCR 识别到"继  续"（字间有空格），`filter_by_keywords` 的 `k in text` 子串匹配对不上"继续"，无 VLM 模式卡 need_human。
 - **根因**：按钮文字两个字间距过大时，PaddleOCR 会在字间插入空格；且该按钮置信度被拉低到 0.64，低于 `OCR_CONFIDENCE_THRESHOLD`（0.7）又被候选过滤。

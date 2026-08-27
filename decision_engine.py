@@ -95,6 +95,17 @@ class DecisionEngine:
         all_text = " ".join(self.ocr_engine.compact_text(r.get("text", ""))
                             for r in ocr_results)
 
+        # 步骤 0：课程结束页固定正文严格匹配时，直接 terminate。
+        # 该正文是平台结束页必现的（如"课程的学习已完成"，见 config_platform），且优先级
+        # 必须高于按钮匹配——结束页上的"继续学习"会命中 start 关键词，若排在按钮之后，
+        # 会把结束页误当成可翻页页，跳过结束检测（坑 17 的反面）。
+        # 安全性：坑 17 的阶段性完成页文案"你已完成了本微课"不含"课程的学习已完成"这个
+        # 完整短语，所以用"严格短语匹配"提前判定不会误伤阶段性完成页。
+        finish_text = getattr(self.config, "COURSE_FINISHED_TEXT", "")
+        if finish_text and finish_text in all_text:
+            return {"action": "terminate", "target": "", "confidence": 1.0,
+                    "reason": "检测到课程结束页固定正文"}
+
         # 步骤 1：收集全部按钮类候选（start/next/submit/guide_click）合并成一个候选池。
         # 排序规则：类别优先（类别顺序）、同类从下到上（filter_by_keywords 已按 y 降序）。
         # 这样"全部查看后才可以继续进行课程"（含"继续"）与"点击翻转"（以"点击"开头）

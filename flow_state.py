@@ -44,6 +44,7 @@ class FlowStateMachine:
 
     def __init__(self):
         self.state = FlowState.BOOT
+        self._count = 0
 
     def transition(self, next_state, reason=""):
         next_state = FlowState(next_state)
@@ -54,6 +55,14 @@ class FlowStateMachine:
                 f"非法状态跳转: {self.state.value} -> {next_state.value} ({reason})")
         previous = self.state
         self.state = next_state
-        print(f"[状态] {previous.value} -> {next_state.value}"
-              + (f"：{reason}" if reason else ""))
+        self._count += 1
+        # 状态变化用分隔线框起来，和 OCR / CLICK / VLM 等普通日志明显区分，
+        # 方便在终端里快速定位"脚本当前走到了哪一步"。
+        print()
+        print("=" * 70)
+        print(f"[状态 #{self._count}]  {previous.value}  ==>  {next_state.value}")
+        if reason:
+            print(f"  原因: {reason}")
+        print("=" * 70)
+        print()
         return previous, next_state

@@ -35,9 +35,15 @@ def parse_args():
 
 
 def _is_course_finished_jump(prev_url, curr_url):
-    # 从课程详情页跳回非详情页（列表页），判定为"课程完成自动跳转"
-    return (config.COURSE_DETAIL_URL_MARK in (prev_url or "")
-            and config.COURSE_DETAIL_URL_MARK not in (curr_url or ""))
+    # 判定"课程真的结束"的两类可靠信号（区别于 next 推进时 URL 仍在详情页内变化）：
+    # 1. 从详情页退回到非详情页（如跳回列表页 /course）；
+    # 2. 跳到课程完成/结束页（如 /wk/comment，视频播完或课程学完后自动跳转）。
+    # 只用 URL 特征、不靠 OCR 文本，避免结束页上的"继续学习"等按钮干扰结束判定。
+    left_detail = (config.COURSE_DETAIL_URL_MARK in (prev_url or "")
+                   and config.COURSE_DETAIL_URL_MARK not in (curr_url or ""))
+    reached_finish = bool(config.COURSE_FINISH_URL_MARK
+                          and config.COURSE_FINISH_URL_MARK in (curr_url or ""))
+    return left_detail or reached_finish
 
 
 def _wait_for_next_lesson(browser, prev_detail_url):

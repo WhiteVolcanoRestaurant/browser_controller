@@ -71,6 +71,8 @@ try:
         TARGET_URL,
         ALLOWED_DOMAINS,
         COURSE_DETAIL_URL_MARK,
+        COURSE_FINISH_URL_MARK,
+        COURSE_FINISHED_TEXT,
         PROGRESS_API_MARKS,
     )
     _PLATFORM_CONFIGURED = True
@@ -79,6 +81,8 @@ except ImportError:
     TARGET_URL = "https://your-platform.example.com/"
     ALLOWED_DOMAINS = []
     COURSE_DETAIL_URL_MARK = "/course/detail"
+    COURSE_FINISH_URL_MARK = ""
+    COURSE_FINISHED_TEXT = ""
     PROGRESS_API_MARKS = []
     _PLATFORM_CONFIGURED = False
 
