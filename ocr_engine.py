@@ -131,18 +131,27 @@ class OCREngine:
                 })
         return results
 
+    @staticmethod
+    def compact_text(text):
+        # OCR 字距较大时会在字之间插入空格（如"继  续"），去掉所有空白再参与匹配。
+        # str.split() 默认按 Unicode 空白切分（含全角空格 \u3000）。
+        return "".join((text or "").split())
+
     def filter_by_keywords(self, ocr_results, keywords):
         # 模糊匹配（text 包含任一关键词），按"从下到上"（y 坐标降序）返回。
+        # 匹配前先去掉文本内所有空白（OCR 会在字距大的字之间插入空格，如"继  续"）。
         # 推进/翻页按钮通常在页面底部、正文在上方，从下到上优先尝试，
         # 避免正文里的误匹配词（如"再三确认"）排在真实按钮前面被先点。
         # 关键：排除否定形式（如"不确定"不应命中"确定"），避免误点。
         matched = []
         for r in ocr_results:
-            text = r.get("text", "")
+            compact = self.compact_text(r.get("text", ""))
+            if not compact:
+                continue
             for k in keywords:
-                if k in text:
+                if k in compact:
                     # "不" + 关键词 出现在 text 里，说明是否定形式（不确定/不提交等），跳过
-                    if ("不" + k) in text:
+                    if ("不" + k) in compact:
                         continue
                     matched.append(r)
                     break
@@ -154,12 +163,13 @@ class OCREngine:
     def locate_by_text(self, ocr_results, target_text):
         # 在 OCR 结果中反查目标文字，返回最佳匹配（含 bbox），找不到返回 None。
         # VLM 只负责决策出要点的文字，坐标由这里的 OCR 结果反查得到。
-        target = (target_text or "").replace(" ", "").strip()
+        # 双方都先去空白（OCR 会在字距大的字之间插入空格），再双向包含匹配。
+        target = self.compact_text(target_text)
         if not target:
             return None
         best = None
         for r in ocr_results:
-            text = (r.get("text", "") or "").replace(" ", "").strip()
+            text = self.compact_text(r.get("text", ""))
             if not text:
                 continue
             # 双向包含匹配，兼容 OCR 漏字/多字导致的细微差异

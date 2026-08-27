@@ -89,7 +89,10 @@ class DecisionEngine:
                 "reason": "VLM 未启用/不可用，请人工处理此页"}
 
     def decide(self, screenshot, ocr_results, page_url):
-        all_text = " ".join(r.get("text", "") for r in ocr_results)
+        # 每条文本先去掉内部空白（OCR 会在字距大的字之间插入空格，如"继  续"），
+        # 再以单空格连接，保证 END_TEXTS / QUESTION_KEYWORDS 的子串匹配不受空格影响。
+        all_text = " ".join(self.ocr_engine.compact_text(r.get("text", ""))
+                            for r in ocr_results)
 
         # 步骤 1：优先匹配"推进进度"按钮（start/next）。学习内容页最明确的信号。
         # 必须排在结束检测之前：阶段性完成页会同时出现"恭喜你，你已完成了本微课"

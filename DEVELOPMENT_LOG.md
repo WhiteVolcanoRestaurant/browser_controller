@@ -134,6 +134,15 @@
   2. `END_TEXTS` 去掉裸"已完成"，改为以正文"课程的学习已完成"为准（保留"学习完成/课程完成/结束"）。
   3. 验证：阶段性完成页 → click "下一页"(325,722)；结束页"课程的学习已完成"+返回列表 → terminate。
 
+### 18、OCR 字距大时在字间插空格（"继  续"）→ 匹配不到按钮
+- **现象**：真实日志（step 13）OCR 识别到"继  续"（字间有空格），`filter_by_keywords` 的 `k in text` 子串匹配对不上"继续"，无 VLM 模式卡 need_human。
+- **根因**：按钮文字两个字间距过大时，PaddleOCR 会在字间插入空格；且该按钮置信度被拉低到 0.64，低于 `OCR_CONFIDENCE_THRESHOLD`（0.7）又被候选过滤。
+- **解法**（[ocr_engine.py](file:///c:/prog_file/code_with_vsc/browser_controller/ocr_engine.py) / [decision_engine.py](file:///c:/prog_file/code_with_vsc/browser_controller/decision_engine.py) / [config.py](file:///c:/prog_file/code_with_vsc/browser_controller/config.py)）：
+  1. 新增 `compact_text()`：匹配前去掉文本内所有空白（含全角空格）。`filter_by_keywords`、`locate_by_text`、`decide()` 的 `all_text`（END_TEXTS / QUESTION_KEYWORDS 判定）统一使用。
+  2. `OCR_CONFIDENCE_THRESHOLD` 0.7 → 0.6：字距大时置信度被拉低到 0.6x，去空格匹配成功后应允许点击。
+  3. `QUESTION_KEYWORDS` 移除"以下"：正文"只要做到以下几点就能防骗"含"以下"，会被误判成题目页（预先存在的问题，与本次同页暴露）。
+  4. 验证：原日志页 → click "继  续"(307,719)。
+
 ## 四、点击定位的演进史（重要经验）
 
 | 阶段 | 做法 | 结果 |

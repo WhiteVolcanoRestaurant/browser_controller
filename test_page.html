@@ -100,8 +100,28 @@
     <button class="btn" onclick="go(5)">下一步</button>
   </section>
 
-  <!-- 第 5 页：多选题 -->
+  <!-- 第 5 页：OCR 鲁棒性 1 —— 按钮文字字间距过大（OCR 会在字间插空格，如"继  续"） -->
   <section class="page" id="page-5">
+    <div class="card">
+      <h2>OCR 测试：字间距过大</h2>
+      <p>按钮文字两个字间距过大时，OCR 会在字间插入空格（识别成"继  续"），
+         匹配前需先去空白。下方按钮文本带空格并加宽字距。</p>
+    </div>
+    <button class="btn" style="letter-spacing: 0.25em;" onclick="go(6)">继  续</button>
+  </section>
+
+  <!-- 第 6 页：OCR 鲁棒性 2 —— 按钮文本换行（OCR 拆成两条互不相连的短文字） -->
+  <section class="page" id="page-6">
+    <div class="card">
+      <h2>OCR 测试：按钮文本换行</h2>
+      <p>按钮文字被拆成两行时，OCR 会识别成两条短文字，单条都无法命中
+         完整按钮关键词，需靠 DOM 兜底/去空白后匹配。</p>
+    </div>
+    <button class="btn" onclick="go(7)">继<br>续</button>
+  </section>
+
+  <!-- 第 7 页：多选题 -->
+  <section class="page" id="page-7">
     <div class="card">
       <div class="q-title">多选题</div>
       <h2>下面哪些行为可能涉及电信诈骗，需要提高警惕？</h2>
@@ -113,17 +133,17 @@
     <button class="btn" onclick="submitQuiz()">提交</button>
   </section>
 
-  <!-- 第 6 页：内容 3 -->
-  <section class="page" id="page-6">
+  <!-- 第 8 页：内容 3 -->
+  <section class="page" id="page-8">
     <div class="card">
       <h2>知识点三：保护个人信息</h2>
       <p>银行卡密码、短信验证码绝不能告诉他人。</p>
     </div>
-    <button class="btn" onclick="go(7)">下一步</button>
+    <button class="btn" onclick="go(9)">下一步</button>
   </section>
 
-  <!-- 第 7 页：完成 -->
-  <section class="page" id="page-7">
+  <!-- 第 9 页：完成 -->
+  <section class="page" id="page-9">
     <div class="card done">已完成</div>
   </section>
 
@@ -137,12 +157,12 @@
     btn.classList.toggle('selected');
   }
   function submitQuiz() {
-    var sel = document.querySelectorAll('#page-4 .option.selected');
+    var sel = document.querySelectorAll('#page-7 .option.selected');
     if (sel.length === 0) {
       alert('请至少选择一个选项');
       return;
     }
-    go(6);
+    go(8);
   }
 </script>
 </body>

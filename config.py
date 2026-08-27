@@ -11,13 +11,15 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MAX_PAGES = 100
 
 # 两次操作之间的间隔（秒）
-MIN_DELAY_SEC = 5
+MIN_DELAY_SEC = 3
 MAX_DELAY_SEC = 15
 
-# OCR 置信度低于此值触发 VLM 兜底
-OCR_CONFIDENCE_THRESHOLD = 0.7
+# OCR 置信度低于此值触发 VLM 兜底。
+# 0.6 而非 0.7：按钮文字字距大时 OCR 会在字间插入空格（如"继  续"），
+# 识别置信度常被拉低到 0.6x，去空格匹配成功后仍应允许点击。
+OCR_CONFIDENCE_THRESHOLD = 0.6
 
-# VLM 置信度低于此值拒绝执行（llava-phi3 为小模型，置信度普遍偏低，适当放宽）
+# VLM 置信度低于此值拒绝执行（小模型置信度普遍偏低，适当放宽）
 VLM_CONFIDENCE_THRESHOLD = 0.4
 
 # 单次运行最大点击次数
@@ -69,7 +71,8 @@ if not _PLATFORM_CONFIGURED:
 
 # 题目关键词，命中则触发 VLM 兜底。
 # 注意：不要放"选择"这种太宽泛的词（内容文本"尽量不要选择货到付款"会误判成题目）。
-QUESTION_KEYWORDS = ["单选", "多选", "判断", "问答", "题目", "哪些", "下列", "以下", "哪项"]
+# 也不用"以下"——正文"只要做到以下几点就能防骗"含"以下"，会被误判成题目页。
+QUESTION_KEYWORDS = ["单选", "多选", "判断", "问答", "题目", "哪些", "下列", "哪项"]
 
 # 目标按钮匹配优先级：start -> next -> submit -> guide_click
 # guide_click：反诈案例页常见的"点击了解/查看/进入"引导语按钮（如"点击了解经过"）。
@@ -110,7 +113,7 @@ USER_AGENT = (
 # 持久化登录态的用户数据目录（复用 edge_profile，无需每次重新登录）
 PROFILE_DIR = os.path.join(BASE_DIR, "edge_profile")
 
-# Ollama VLM 配置
+# Ollama VLM 配置（testVLM.py 与主流程 VLMClient 均从这里读取实际模型）
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_MODEL = "llava-phi3"
 VLM_TIMEOUT = 60
