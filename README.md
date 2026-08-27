@@ -38,7 +38,7 @@
 | [config.py](config.py)                                    | 全局配置：按钮关键词、阈值、视口；平台域名/API 特征从本地 `config_platform.py` 桥接读取 |
 | [config\_platform.example.py](config_platform.example.py) | 平台配置模板（占位符）；真实平台信息只写本地 `config_platform.py`，不进仓库          |
 | [setup\_local.py](setup_local.py)                         | 交互式生成本地平台配置 `config_platform.py`（只留本地、不上云）                |
-| [browser\_controller.py](browser_controller.py)           | 浏览器控制：截图、iframe 点击、DOM 兜底、视频检测、API 监听、reload              |
+| [browser\_controller.py](browser_controller.py)           | 浏览器控制：截图、iframe 点击、必修课列表观察、DOM 兜底、视频检测、API 监听、reload       |
 | [ocr\_engine.py](ocr_engine.py)                           | PaddleOCR 封装：识别、关键词过滤、文字反查坐标                              |
 | [decision\_engine.py](decision_engine.py)                 | 决策引擎：关键词匹配 → 题目 VLM → 语义兜底；VLM 双提示词                       |
 | [vlm\_client.py](vlm_client.py)                           | Ollama 客户端：健康检查、请求、JSON 解析                                |
@@ -52,7 +52,8 @@
 navigate
   → screenshot
   → OCR 识别
-  → decide 决策（结束 > start/next > 题目VLM > submit > wait）
+  → 课程列表：DOM 选择首个未完成必修课（不进入选修课/在线考试）
+  → 课程详情：decide 决策（结束 > start/next > 题目VLM > submit > wait）
       ├─ 失败 → DOM 兜底（可见文字 + next-btn class）
       └─ 仍失败 → 语义兜底（VLM 判断推进按钮；列表页直接 need_human）
   → 安全校验（URL 白名单 / 坐标 / 频率 / 次数）
@@ -82,7 +83,7 @@ navigate
 5. 显式状态机：观察 → 决策 → 单次操作 → 验证；失败时先观察可见 btn-next，再走 VLM，最后人工。
 6. VLM 健康检查 + `--no-vlm` / `ENABLE_VLM=False` 跳过机制。
 7. 多候选跨轮试错：保留候选池排序，但每轮只操作一个，失败后重新截图再选下一个。
-8. 列表页识别：非详情页直接 need\_human，避免 VLM 在课程列表上幻觉。
+8. 必修课自动选择：依据页签/分类完成数和课程行 `passed` 类，自动展开首个未完成分类并选择首个无绿色角标课程；不进入选修课和在线考试。
 9. 可视化台账：`report.py` 生成 `report.html`，含困难样本（附 VLM 返回内容）。
 
 ### 🚧 已知局限（待打磨）
@@ -95,9 +96,8 @@ navigate
 
 ### ⬜ 未实现 / 后续方向
 
-1. 自动从列表页挑选未完成课程继续（当前列表页停住等用户选课）。
-2. 跨行文本合并，缓解 OCR 拆词问题。
-3. 用相似度比较（而非 hash 精确比对）做更稳的重复检测。
+1. 跨行文本合并，缓解 OCR 拆词问题。
+2. 用相似度比较（而非 hash 精确比对）做更稳的重复检测。
 
 ***
 
@@ -147,6 +147,8 @@ python main.py
 python main.py "https://<你的课程平台主页>/课程地址"
 # 跳过 VLM（无 Ollama / 显存不足时）
 python main.py "https://<你的课程平台主页>/课程地址" --no-vlm
+# 实验分支默认自动选择未完成必修课；如需恢复人工选课：
+python main.py --manual-course-selection
 
 # 8. 本地回归测试（不连真实平台，自动起服务器跑通 test_page.html 全流程）
 python test_flow.py
@@ -166,6 +168,7 @@ python test_flow.py --no-vlm
 | ----------------------------- | ----------------- |
 | `python main.py URL`          | 主流程自动学习（默认启用 VLM） |
 | `python main.py URL --no-vlm` | 跳过 VLM，思考页直接转人工   |
+| `python main.py URL --manual-course-selection` | 关闭自动选择未完成必修课，列表页改为人工选择 |
 | `python test_flow.py`         | 本地测试页全流程测试（自动起服务器，无需手动 `http.server`） |
 
 ### 调试工具
@@ -200,6 +203,7 @@ python test_flow.py --no-vlm
 | `QUESTION_KEYWORDS`          | [config.py](config.py)                               | 题目触发词（单选/多选/判断/哪些…），勿放"选择"等宽泛词             |
 | `END_TEXTS`                  | [config.py](config.py)                               | 课程完成判定文本                                   |
 | `NEXT_BUTTON_CLASS_HINTS`    | [config.py](config.py)                               | 翻页按钮 class 特征（比 OCR 文字更稳）                  |
+| `ENABLE_AUTO_COURSE_SELECTION` | [config.py](config.py)                             | 是否自动选择无绿色角标的未完成必修课；不会选择选修课或在线考试       |
 | `COURSE_DETAIL_URL_MARK`     | [config\_platform.py](config_platform.example.py)    | 详情页 URL 特征（用于"往回跳即结束"与列表页判断）               |
 | `ALLOWED_DOMAINS`            | [config\_platform.py](config_platform.example.py)    | 域名白名单                                      |
 

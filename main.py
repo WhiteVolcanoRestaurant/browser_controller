@@ -31,6 +31,8 @@ def parse_args():
                         help="课程网页 URL（默认 %(default)s）")
     parser.add_argument("--no-vlm", action="store_true",
                         help="跳过 VLM（不调用 Ollama），所有需要思考的页面直接转人工介入")
+    parser.add_argument("--manual-course-selection", action="store_true",
+                        help="关闭实验性自动选课，回到人工选择下一门课程")
     return parser.parse_args()
 
 
@@ -38,6 +40,13 @@ def _is_course_finished_jump(prev_url, curr_url):
     # 从课程详情页跳回非详情页（列表页），判定为"课程完成自动跳转"
     return (config.COURSE_DETAIL_URL_MARK in (prev_url or "")
             and config.COURSE_DETAIL_URL_MARK not in (curr_url or ""))
+
+
+def _is_course_list_page(url):
+    """只识别课程列表路由，避免把登录页或其它非详情页当成选课页。"""
+    current = url or ""
+    return (config.COURSE_LIST_URL_MARK in current
+            and config.COURSE_DETAIL_URL_MARK not in current)
 
 
 def _wait_for_next_lesson(browser, prev_detail_url):
@@ -88,7 +97,7 @@ def _vlm_before_human(flow, decision, screenshot, ocr_results, page_url, reason)
             "source": "vlm"}
 
 
-def main(course_url, enable_vlm=True):
+def main(course_url, enable_vlm=True, enable_auto_course_selection=None):
     # 1. 初始化所有模块
     browser = BrowserController(channel=config.BROWSER_CHANNEL, headless=False)
     ocr = OCREngine(use_gpu=True)
@@ -113,6 +122,12 @@ def main(course_url, enable_vlm=True):
     sandbox = SafetySandbox(config)
     logger = ActionLogger(os.path.join(config.LOG_DIR, "action_log.jsonl"))
     flow = FlowStateMachine()
+    if enable_auto_course_selection is None:
+        enable_auto_course_selection = config.ENABLE_AUTO_COURSE_SELECTION
+    if enable_auto_course_selection:
+        print("[自动选课] 已启用：只选择未完成的必修课，不进入选修课或在线考试。")
+    else:
+        print("[自动选课] 已关闭：课程列表页将等待人工选择。")
 
     # 两个计数用途不同（正常跳转/页面变动时都会重置）：
     # - no_progress_count：记录当前页面已发生的无效点击，用于日志与人工提示。
@@ -154,9 +169,13 @@ def main(course_url, enable_vlm=True):
                                    details={"page_url": current_url,
                                             "message": "课程完成，自动跳回列表页"})
                         print("[完成] 检测到从详情页跳回列表页，判定本课完成。")
-                        # 正常完成：不退出，等待用户打开下一节
-                        new_url = _wait_for_next_lesson(browser, prev_url)
-                        prev_url = new_url
+                        if enable_auto_course_selection and _is_course_list_page(current_url):
+                            print("[自动选课] 已返回课程列表，准备选择下一门未完成必修课。")
+                            prev_url = current_url
+                        else:
+                            # 自动选课关闭时保留原行为：等待用户打开下一节。
+                            new_url = _wait_for_next_lesson(browser, prev_url)
+                            prev_url = new_url
                         no_progress_count = 0
                         continue
                 prev_url = current_url
@@ -197,19 +216,33 @@ def main(course_url, enable_vlm=True):
                 flow.transition(FlowState.DECIDE, "根据截图、OCR和DOM生成候选")
                 # 当前活动页中已真正可见、未遮挡、未禁用的 btn-next 优先级最高。
                 # 隐藏的预置按钮不会通过 find_next_button 的可操作性检查。
-                dom_next = browser.find_next_button()
-                if dom_next:
+                is_auto_course_list = (
+                    enable_auto_course_selection
+                    and _is_course_list_page(page.url)
+                )
+                if is_auto_course_list:
+                    # 列表页有自己的确定性 DOM 规则，不继承上一课程内容页的 VLM 升级请求。
                     force_vlm_reason = ""
-                    (dx, dy), meta = dom_next
-                    decision_result = {
-                        "action": "click", "x": dx, "y": dy,
-                        "target": meta.get("cls", "btn-next"),
-                        "confidence": 0.98,
-                        "reason": "活动页存在可见且可操作的翻页元素",
-                        "source": "dom_next",
-                    }
+                    decision_result = browser.find_unfinished_required_course()
+                    decision_result["source"] = "course_selector"
+                    # 定位视口外课程时，DOM 观察器会先滚动到目标；更新点击前截图，
+                    # 避免把滚动造成的画面变化误认为点击已生效。
+                    if decision_result.pop("view_changed", False):
+                        screenshot = browser.screenshot()
                 else:
-                    decision_result = decision.decide(screenshot, ocr_results, page.url)
+                    dom_next = browser.find_next_button()
+                    if dom_next:
+                        force_vlm_reason = ""
+                        (dx, dy), meta = dom_next
+                        decision_result = {
+                            "action": "click", "x": dx, "y": dy,
+                            "target": meta.get("cls", "btn-next"),
+                            "confidence": 0.98,
+                            "reason": "活动页存在可见且可操作的翻页元素",
+                            "source": "dom_next",
+                        }
+                    else:
+                        decision_result = decision.decide(screenshot, ocr_results, page.url)
                 if (decision_result.get("source") == "vlm"
                         and flow.state == FlowState.DECIDE):
                     # 题目推理发生在 DecisionEngine 内部，返回后补记显式状态。
@@ -221,13 +254,39 @@ def main(course_url, enable_vlm=True):
                     decision_result = _vlm_before_human(
                         flow, decision, screenshot, ocr_results, page.url, reason)
 
+                # 自动连续学习：课程结束页优先点击页面自身的“返回课程列表”按钮。
+                # 完成状态已经由正文确认，因此此处只负责回到列表，不选择选修课或考试。
+                if (enable_auto_course_selection
+                        and decision_result.get("action") == "terminate"
+                        and config.COURSE_DETAIL_URL_MARK in (page.url or "")):
+                    list_return = browser.find_text_element_center(
+                        config.COURSE_LIST_RETURN_KEYWORDS)
+                    if list_return:
+                        (dx, dy), meta = list_return
+                        decision_result = {
+                            "action": "click", "x": dx, "y": dy,
+                            "target": meta.get("text", "返回课程列表"),
+                            "confidence": 0.99,
+                            "reason": "课程已经完成，返回必修课列表继续选择",
+                            "source": "course_selector",
+                        }
+                    else:
+                        decision_result = {
+                            "action": "need_human",
+                            "reason": "课程已经完成，但没有找到返回课程列表按钮",
+                            "source": "course_selector",
+                        }
+
                 # 3.3.1 兜底：如果 OCR 为空/决策是 wait，但页面里确实有"下一步/下一页"等按钮，
                 #        用 Playwright 直接读 DOM 渲染层的可见文字定位坐标。
                 #        解决视频/iframe 课程页导致 OCR 识别不到文字的问题。
                 need_dom_fallback = (
-                    not ocr_results
-                    or decision_result.get("action") == "wait"
-                    or decision_result.get("action") == "error"
+                    not is_auto_course_list
+                    and (
+                        not ocr_results
+                        or decision_result.get("action") == "wait"
+                        or decision_result.get("action") == "error"
+                    )
                 )
                 if need_dom_fallback:
                     dom_keywords = []
@@ -279,7 +338,8 @@ def main(course_url, enable_vlm=True):
 
                 # 统一的人工门禁：非 VLM 产生的 need_human，在 VLM 可用时必须先推理。
                 if (decision_result.get("action") == "need_human"
-                        and decision_result.get("source") not in ("vlm", "vlm_unavailable")):
+                        and decision_result.get("source") not in (
+                            "vlm", "vlm_unavailable", "course_selector")):
                     original_reason = decision_result.get("reason", "当前页面无法可靠自动处理")
                     reasoned = _vlm_before_human(
                         flow, decision, screenshot, ocr_results, page.url, original_reason)
@@ -367,6 +427,7 @@ def main(course_url, enable_vlm=True):
                         "x": x, "y": y,
                         "confidence": cand.get("confidence", 0),
                         "source": decision_result.get("source", "ocr_or_vlm"),
+                        "selector_action": decision_result.get("selector_action"),
                         "result": why,
                         "candidates": [{
                             "target": _c.get("target"),
@@ -446,7 +507,7 @@ def main(course_url, enable_vlm=True):
                                details={"page_url": page.url,
                                         "reason": decision_result.get("reason")})
                     print("\n" + "=" * 60)
-                    print("[需人工介入] 检测到题目但系统无法确定答案。")
+                    print("[需人工介入] 当前页面无法继续可靠自动处理。")
                     print(f"原因: {decision_result.get('reason', '未知')}")
                     print("请在浏览器中手动完成此题，脚本检测到翻页后会自动继续（按 Ctrl+C 可退出）。")
                     prev_need_url = page.url
@@ -467,6 +528,15 @@ def main(course_url, enable_vlm=True):
                                     decision_result.get("reason", "未知错误"))
                     logger.log(step=page_count, action="error",
                                details={"page_url": page.url, "reason": decision_result.get("reason")})
+                    break
+
+                elif action == "complete":
+                    reason = decision_result.get(
+                        "reason", "所有必修课均已完成")
+                    flow.transition(FlowState.COMPLETE, reason)
+                    logger.log(step=page_count, action="required_courses_complete",
+                               details={"page_url": page.url, "reason": reason})
+                    print(f"[自动选课完成] {reason}")
                     break
 
                 elif action == "terminate":
@@ -508,7 +578,14 @@ def main(course_url, enable_vlm=True):
 if __name__ == "__main__":
     args = parse_args()
     try:
-        main(args.course_url, enable_vlm=not args.no_vlm)
+        main(
+            args.course_url,
+            enable_vlm=not args.no_vlm,
+            enable_auto_course_selection=(
+                config.ENABLE_AUTO_COURSE_SELECTION
+                and not args.manual_course_selection
+            ),
+        )
     except KeyboardInterrupt:
         print("\n[中断] 用户按 Ctrl+C 停止，浏览器已关闭，日志已保存。")
         sys.exit(0)

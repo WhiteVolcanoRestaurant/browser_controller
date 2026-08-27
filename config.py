@@ -42,6 +42,14 @@ MAX_RELOAD_COUNT = 2
 # 适合不想跑本地大模型/显存不足的用户。
 ENABLE_VLM = True
 
+# 实验功能：课程列表页自动选择尚未完成的必修课。
+# 只处理“必修课”，不会切换“选修课”或“在线考试”；课程行没有 passed 类时视为未完成，
+# 不再区分“从未开始”和“已经开始但尚未完成”。可用 --manual-course-selection 临时关闭。
+ENABLE_AUTO_COURSE_SELECTION = True
+COURSE_LIST_URL_MARK = "#/course"
+REQUIRED_COURSE_TAB_NAME = "必修课"
+COURSE_LIST_RETURN_KEYWORDS = ["返回课程列表", "返回列表"]
+
 # 紧急停止热键（说明用；实际由 Ctrl+C 触发的 KeyboardInterrupt 处理）
 ESC_KEY = "Escape"
 

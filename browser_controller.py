@@ -307,16 +307,38 @@ class BrowserController:
           }
           return targets;
         }"""
+        all_results = []
         try:
-            results = self.page.evaluate(js, list(keywords))
+            all_results.extend(self.page.evaluate(js, list(keywords)) or [])
         except Exception as e:
-            print(f"[DOM] find_text_element_center 异常: {e}")
-            return None
-        if not results:
+            print(f"[DOM] find_text_element_center 主文档异常: {e}")
+        # 课程内容和完成页可能位于 iframe；把 iframe 内坐标映射回主文档坐标。
+        try:
+            frames = self.page.frames
+        except Exception:
+            frames = []
+        for frame in frames:
+            if frame == self.page.main_frame:
+                continue
+            try:
+                frame_box = frame.frame_element().bounding_box()
+                inner = frame.evaluate(js, list(keywords)) or []
+            except Exception:
+                continue
+            if not frame_box:
+                continue
+            for item in inner:
+                item["x"] = int(item.get("x", 0) + frame_box.get("x", 0))
+                item["y"] = int(item.get("y", 0) + frame_box.get("y", 0))
+                if (0 <= item["x"] < self.viewport_width
+                        and 0 <= item["y"] < self.viewport_height):
+                    item["frame"] = True
+                    all_results.append(item)
+        if not all_results:
             return None
         # 从下到上优先（推进按钮通常在页面底部、正文在上方），取最靠下的命中
-        results.sort(key=lambda r: r.get("y", 0), reverse=True)
-        best = results[0]
+        all_results.sort(key=lambda r: r.get("y", 0), reverse=True)
+        best = all_results[0]
         print(f"[DOM] 通过渲染层定位到关键词: \"{best['hit']}\" -> 匹配 \"{best['text']}\" @ ({int(best['x'])}, {int(best['y'])})")
         return (int(best["x"]), int(best["y"])), best
 
@@ -325,6 +347,159 @@ class BrowserController:
         # 解决"下一页/继续/下一步"等文字变化但 class 恒为 next-btn 的情况。
         hints = list(getattr(config, "NEXT_BUTTON_CLASS_HINTS", ["next-btn", "next"]))
         return self._find_by_class(hints)
+
+    def find_unfinished_required_course(self):
+        """观察课程列表，并返回下一项安全操作。
+
+        识别顺序固定为：必修课页签 -> 未完成分类 -> 不含 passed 类的课程。
+        选修课和在线考试不会进入候选池。DOM 只负责读取状态和坐标，实际点击仍由
+        click_and_verify 通过浏览器输入层完成。
+        """
+        if not self.page:
+            return {
+                "action": "need_human",
+                "reason": "浏览器页面尚未初始化，无法自动选择必修课",
+            }
+
+        js = r"""(requiredTabName) => {
+          const compact = (value) => (value || '').replace(/\s+/g, '');
+          const progress = (el) => {
+            const match = compact(el && (el.innerText || el.textContent || ''))
+              .match(/(\d+)\/(\d+)/);
+            if (!match) return null;
+            return {done: Number(match[1]), total: Number(match[2])};
+          };
+          const elementName = (el, selector) => {
+            const named = selector ? el.querySelector(selector) : null;
+            return ((named && (named.innerText || named.textContent))
+              || el.innerText || el.textContent || '').trim();
+          };
+          const target = (el, kind, name, extra) => {
+            if (!el) return {action: 'need_human', reason: '目标元素不存在'};
+            let rect = el.getBoundingClientRect();
+            let scrolled = false;
+            const marginTop = 80;
+            const marginBottom = 90;
+            if (rect.top < marginTop || rect.bottom > window.innerHeight - marginBottom) {
+              el.scrollIntoView({block: 'center', inline: 'nearest'});
+              rect = el.getBoundingClientRect();
+              scrolled = true;
+            }
+            const style = getComputedStyle(el);
+            if (rect.width <= 0 || rect.height <= 0
+                || style.display === 'none' || style.visibility === 'hidden'
+                || Number(style.opacity) <= 0.05 || style.pointerEvents === 'none') {
+              return {action: 'need_human', reason: `目标“${name}”当前不可见或不可点击`};
+            }
+            const x = rect.left + rect.width / 2;
+            const y = rect.top + rect.height / 2;
+            const hit = document.elementFromPoint(x, y);
+            if (!hit || !(hit === el || el.contains(hit) || hit.contains(el))) {
+              return {action: 'need_human', reason: `目标“${name}”被其它元素遮挡`};
+            }
+            return Object.assign({
+              action: 'click',
+              x: Math.round(x), y: Math.round(y),
+              target: name,
+              selector_action: kind,
+              confidence: 0.99,
+              view_changed: scrolled,
+            }, extra || {});
+          };
+
+          const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+          const required = tabs.find((tab) => {
+            const name = tab.querySelector('.name');
+            return compact(name && (name.innerText || name.textContent))
+              === compact(requiredTabName);
+          });
+          if (!required) {
+            return {action: 'need_human', reason: '没有找到“必修课”页签'};
+          }
+          const requiredProgress = progress(required.querySelector('.completion') || required);
+          if (!requiredProgress || requiredProgress.total <= 0) {
+            return {action: 'need_human', reason: '无法读取必修课完成进度'};
+          }
+          if (requiredProgress.done >= requiredProgress.total) {
+            return {
+              action: 'complete',
+              reason: `必修课已全部完成（${requiredProgress.done}/${requiredProgress.total}）`,
+              required_progress: requiredProgress,
+            };
+          }
+
+          const active = required.getAttribute('aria-selected') === 'true'
+            || required.classList.contains('van-tab--active');
+          if (!active) {
+            return target(required, 'activate_required_tab', requiredTabName, {
+              reason: `当前不在必修课页签，切换到必修课（${requiredProgress.done}/${requiredProgress.total}）`,
+              required_progress: requiredProgress,
+            });
+          }
+
+          const groups = Array.from(document.querySelectorAll('.van-collapse-item'));
+          const incompleteGroups = groups.map((group) => {
+            const title = group.querySelector('.van-collapse-item__title');
+            const count = progress(group.querySelector('.count'));
+            return {group, title, count};
+          }).filter((entry) => entry.title && entry.count
+              && entry.count.total > 0 && entry.count.done < entry.count.total);
+
+          if (!incompleteGroups.length) {
+            return {
+              action: 'need_human',
+              reason: `必修课总进度为${requiredProgress.done}/${requiredProgress.total}，但没有找到未完成分类`,
+            };
+          }
+
+          const entry = incompleteGroups[0];
+          const category = elementName(entry.group, '.text');
+          const expanded = entry.title.getAttribute('aria-expanded') === 'true';
+          if (!expanded) {
+            return target(entry.title, 'expand_category', category, {
+              reason: `展开未完成分类“${category}”（${entry.count.done}/${entry.count.total}）`,
+              category,
+              category_progress: entry.count,
+              required_progress: requiredProgress,
+            });
+          }
+
+          const courses = Array.from(
+            entry.group.querySelectorAll('li.img-texts-item'));
+          const unfinished = courses.find((course) =>
+            !course.classList.contains('passed'));
+          if (!unfinished) {
+            return {
+              action: 'need_human',
+              reason: `分类“${category}”显示${entry.count.done}/${entry.count.total}，但没有找到无绿色角标的课程`,
+            };
+          }
+          const courseName = elementName(unfinished, '.title');
+          if (!courseName) {
+            return {action: 'need_human', reason: `分类“${category}”中的未完成课程缺少标题`};
+          }
+          return target(unfinished, 'select_course', courseName, {
+            reason: `选择分类“${category}”中第一门无绿色角标的必修课`,
+            category,
+            category_progress: entry.count,
+            required_progress: requiredProgress,
+          });
+        }"""
+        try:
+            result = self.page.evaluate(
+                js, getattr(config, "REQUIRED_COURSE_TAB_NAME", "必修课"))
+        except Exception as e:
+            return {
+                "action": "need_human",
+                "reason": f"读取必修课列表 DOM 失败: {e}",
+            }
+        if not result:
+            return {
+                "action": "need_human",
+                "reason": "必修课列表观察没有返回结果",
+            }
+        print(f"[自动选课] {result.get('reason', result.get('action', '未知结果'))}")
+        return result
 
     def _find_by_class(self, hints):
         js = """(hints) => {

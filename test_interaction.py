@@ -97,6 +97,126 @@ class BrowserInteractionTests(unittest.TestCase):
             self.page.unroute("**/progress/next")
             config.PROGRESS_API_MARKS = old_marks
 
+    def test_text_fallback_finds_course_list_return_inside_iframe(self):
+        self.page.set_content("""
+          <iframe id="course" style="width:390px;height:500px;border:0"
+            srcdoc="<button style='margin-top:300px;width:240px;height:60px'>返回课程列表</button>">
+          </iframe>
+        """)
+        self.page.wait_for_timeout(100)
+        found = self.controller.find_text_element_center(["返回课程列表"])
+        self.assertIsNotNone(found)
+        self.assertTrue(found[1].get("frame"))
+        self.assertIn("返回课程列表", found[1]["text"])
+
+    def test_course_selector_chooses_first_unpassed_required_course(self):
+        self.page.set_content("""
+          <style>
+            [role=tab], .van-collapse-item__title, .img-texts-item {
+              display:block; width:360px; min-height:48px; margin:4px;
+            }
+          </style>
+          <div role="tab" aria-selected="true" class="van-tab van-tab--active">
+            <span class="completion"><em>1</em>/3</span><span class="name">必修课</span>
+          </div>
+          <div role="tab"><span class="completion"><em>0</em>/60</span>
+            <span class="name">选修课</span></div>
+          <div role="tab"><span class="completion"><em>0</em>/1</span>
+            <span class="name">在线考试</span></div>
+          <section class="van-collapse-item">
+            <div class="van-collapse-item__title" aria-expanded="true">
+              <span class="text">防范诈骗</span><span class="count"><b>1</b>/2</span>
+            </div>
+            <ul>
+              <li class="img-texts-item passed"><h5 class="title">绿色角标课程</h5></li>
+              <li class="img-texts-item"><h5 class="title">未完成必修课</h5></li>
+            </ul>
+          </section>
+          <section class="elective"><li class="img-texts-item">
+            <h5 class="title">选修课不应被选择</h5></li></section>
+        """)
+        result = self.controller.find_unfinished_required_course()
+        self.assertEqual(result["action"], "click")
+        self.assertEqual(result["selector_action"], "select_course")
+        self.assertEqual(result["target"], "未完成必修课")
+        self.assertEqual(result["category"], "防范诈骗")
+
+    def test_course_selector_expands_incomplete_category_first(self):
+        self.page.set_content("""
+          <div role="tab" aria-selected="true" class="van-tab--active"
+               style="height:50px;width:360px">
+            <span class="completion">22/60</span><span class="name">必修课</span>
+          </div>
+          <section class="van-collapse-item">
+            <div class="van-collapse-item__title" aria-expanded="false"
+                 style="height:60px;width:360px">
+              <span class="text">安全文化</span><span class="count">2/2</span>
+            </div>
+          </section>
+          <section class="van-collapse-item">
+            <div class="van-collapse-item__title" aria-expanded="false"
+                 style="height:60px;width:360px">
+              <span class="text">防范诈骗</span><span class="count">15/22</span>
+            </div>
+          </section>
+        """)
+        result = self.controller.find_unfinished_required_course()
+        self.assertEqual(result["action"], "click")
+        self.assertEqual(result["selector_action"], "expand_category")
+        self.assertEqual(result["target"], "防范诈骗")
+
+    def test_course_selector_switches_back_to_required_tab(self):
+        self.page.set_content("""
+          <div role="tab" style="height:60px;width:120px">
+            <span class="completion">22/60</span><span class="name">必修课</span>
+          </div>
+          <div role="tab" aria-selected="true" class="van-tab--active"
+               style="height:60px;width:120px">
+            <span class="completion">0/60</span><span class="name">选修课</span>
+          </div>
+          <div role="tab" style="height:60px;width:120px">
+            <span class="completion">0/1</span><span class="name">在线考试</span>
+          </div>
+        """)
+        result = self.controller.find_unfinished_required_course()
+        self.assertEqual(result["action"], "click")
+        self.assertEqual(result["selector_action"], "activate_required_tab")
+        self.assertEqual(result["target"], "必修课")
+
+    def test_course_selector_stops_when_required_courses_complete(self):
+        self.page.set_content("""
+          <div role="tab" style="height:60px;width:120px">
+            <span class="completion">60/60</span><span class="name">必修课</span>
+          </div>
+          <div role="tab" aria-selected="true" class="van-tab--active"
+               style="height:60px;width:120px">
+            <span class="completion">0/60</span><span class="name">选修课</span>
+          </div>
+        """)
+        result = self.controller.find_unfinished_required_course()
+        self.assertEqual(result["action"], "complete")
+        self.assertIn("60/60", result["reason"])
+
+    def test_course_selector_rejects_inconsistent_category_state(self):
+        self.page.set_content("""
+          <div role="tab" aria-selected="true" class="van-tab--active"
+               style="height:60px;width:360px">
+            <span class="completion">1/3</span><span class="name">必修课</span>
+          </div>
+          <section class="van-collapse-item">
+            <div class="van-collapse-item__title" aria-expanded="true"
+                 style="height:60px;width:360px">
+              <span class="text">防范诈骗</span><span class="count">1/2</span>
+            </div>
+            <li class="img-texts-item passed" style="height:60px;width:360px">
+              <h5 class="title">已完成课程</h5>
+            </li>
+          </section>
+        """)
+        result = self.controller.find_unfinished_required_course()
+        self.assertEqual(result["action"], "need_human")
+        self.assertIn("没有找到无绿色角标", result["reason"])
+
     def test_test_page_orders_simple_then_unlocked_image(self):
         self.page.goto(Path("test_page.html").resolve().as_uri())
         self.page.locator("#page-1 .btn").click()

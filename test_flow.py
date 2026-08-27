@@ -138,7 +138,11 @@ def main():
     flow_main._wait_for_next_lesson = _test_finished
 
     try:
-        flow_main.main(test_url, enable_vlm=not args.no_vlm)
+        flow_main.main(
+            test_url,
+            enable_vlm=not args.no_vlm,
+            enable_auto_course_selection=False,
+        )
         print("[测试] 主流程正常结束。")
     except TestFinished as e:
         print(f"\n[测试] 成功：{e}")

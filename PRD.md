@@ -34,6 +34,9 @@ TARGET_BUTTONS = {
 NEXT_BUTTON_CLASS_HINTS = ["next-btn", "next", "btn-next"]  # 翻页按钮 DOM class 特征
 MAX_RELOAD_COUNT = 2                 # 单次运行自动刷新上限（防封号）
 COURSE_DETAIL_URL_MARK = "/course/detail"  # 详情页 URL 特征，用于"往回跳即结束"
+ENABLE_AUTO_COURSE_SELECTION = True        # 自动选择无绿色角标的未完成必修课
+COURSE_LIST_URL_MARK = "#/course"          # 课程列表路由特征
+REQUIRED_COURSE_TAB_NAME = "必修课"         # 仅处理必修课，不进入选修/考试
 BROWSER_CHANNEL = "msedge"
 VIEWPORT_WIDTH = 414               # H5 课程页只有中间一小块，用手机竖屏消除两侧留白
 VIEWPORT_HEIGHT = 896
@@ -404,7 +407,7 @@ class ActionLogger:
 ## 四、核心工作流（主循环）
 
 ```
-主函数 main(course_url, enable_vlm=True):
+主函数 main(course_url, enable_vlm=True, enable_auto_course_selection=True):
 
     # 1. 初始化所有模块
     browser = BrowserController(channel="msedge", headless=False)
@@ -438,7 +441,10 @@ class ActionLogger:
         if prev_url and page.url != prev_url:
             no_progress_count = 0
             if _is_course_finished_jump(prev_url, page.url):
-                # 从详情页跳回列表页 → 本课完成 → 不退出，等待用户打开下一节
+                # 从详情页跳回列表页 → 本课完成。
+                # 自动选课开启时回到列表决策；关闭时等待用户打开下一节。
+                if enable_auto_course_selection:
+                    continue
                 _wait_for_next_lesson(browser, prev_url)
                 continue
 
@@ -450,12 +456,18 @@ class ActionLogger:
         if not ocr_results:
             browser.wait(1000); ocr_results = ocr.recognize(screenshot)
 
-        # 3.3 决策（结束 > start/next > 题目VLM > submit > wait）
-        decision_result = decision.decide(screenshot, ocr_results, page.url)
+        # 3.3 决策
+        if enable_auto_course_selection and _is_course_list_page(page.url):
+            # 只读取必修页签、分类计数与课程行 passed 类：
+            # 切回必修 → 展开首个未完成分类 → 点击首个无绿色角标课程。
+            # 必修全部完成即结束，不进入选修课或在线考试。
+            decision_result = browser.find_unfinished_required_course()
+        else:
+            decision_result = decision.decide(screenshot, ocr_results, page.url)
 
         # 3.3.1 DOM 兜底：OCR 空 / wait / error 时，读 DOM 可见文字 + next-btn class 定位
         # 3.3.2 语义兜底：连续 2 次 wait 未匹配 + DOM 也找不到 + 无视频时，VLM 判断推进按钮；
-        #            列表页（非 /course/detail）直接 need_human，不走语义兜底（防 VLM 幻觉）
+        #            详情页才允许使用；列表页由确定性 DOM 选课规则处理，不让 VLM 猜测课程状态
 
         # 3.4 安全校验（URL 白名单 S1，偏离即终止）
 
@@ -464,7 +476,7 @@ class ActionLogger:
         #   VERIFY 以“匹配请求发出 + 收到响应”为首要成功信号，URL/截图变化为普通交互兜底
         #   wait    → 视频页只观察状态/可见播放控件，不调用 video.play()/element.click()
         #   need_human → VLM 可用时必须先进入 VLM_REASONING，仍无法处理才 HUMAN
-        #   terminate  → _wait_for_next_lesson 等用户打开下一节
+        #   terminate  → 自动选课开启时点击“返回课程列表”；关闭时等待用户打开下一节
         #
         # 升级顺序：未失败候选 → 当前活动页可见 btn-next → VLM_REASONING → HUMAN
 
@@ -544,7 +556,7 @@ _decision_engine.semantic_fallback(screenshot, ocr_results, page_url):
        - 连续 >= 2 次 wait 且 reason 含"未匹配"
        - DOM 兜底（可见文字 + next-btn class）都找不到
        - detect_video() 无视频
-       - 页面 URL 含 COURSE_DETAIL_URL_MARK（列表页不触发，直接 need_human，防 VLM 幻觉）
+       - 页面 URL 含 COURSE_DETAIL_URL_MARK（列表页不触发；列表页走必修课 DOM 选择器）
 
     2. 使用独立的 prompt（VLM_NAV_RULES）：
        - 只允许输出 click / need_human 两种 action（不需要 wait/terminate）
