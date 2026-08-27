@@ -19,6 +19,8 @@ debug_snapshot.png
 *.log
 logs/
 test*.png
+.cache/
+.dev_staging/
 
 # 抓包调试文件（含 token/cookie/sign 等敏感信息，勿提交）
 api*.txt
