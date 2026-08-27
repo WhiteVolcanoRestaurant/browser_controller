@@ -82,7 +82,7 @@
 - **根因**：播放按钮是图标（非文字），OCR 只认文字；播放中视频画面是动态帧，没有可点文字。
 - **解法**（[browser_controller.py](file:///c:/prog_file/code_with_vsc/browser_controller/browser_controller.py)）：
   1. `detect_video()` 跨 iframe 检测 `<video>` 的 paused/playing 状态。
-  2. `try_play_video()` 尝试点击常见播放按钮 + `video.play()`。
+  2. `try_play_video()` 只读取可见播放按钮边界，再通过浏览器输入层点击；不调用 `video.play()`。
   3. main.py 在「wait 未匹配」时检测视频：playing 则等待；paused 则先自动播放、失败再提醒用户手动点播放，播放完出现"下一页"后自动继续。
 
 ### 10、Page 没有 wait_for_request 方法（API 监听完全失效）
@@ -151,9 +151,10 @@
 | 2 | JS `elementFromPoint().click()` | 主文档只命中 iframe 元素，穿透不了 |
 | 3 | 定位元素中心 + `page.mouse/touchscreen` 穿透点击 | 移动端模拟下穿透仍失效 |
 | 4 | 命中 iframe 就用原始坐标穿透 | iframe 内外缩放导致坐标对不上 |
-| 5 | **frame API 切进 iframe 内部 `elementFromPoint` + `.click()`** | ✅ 成功 |
+| 5 | frame API 切进 iframe 内部 `elementFromPoint` + `.click()` | 能推进，但属于 JavaScript 直接激活 |
+| 6 | **DOM/OCR 只给坐标，Playwright 输入层单次 tap/click** | ✅ 当前方案，不再伪造 TouchEvent 或调用 element.click() |
 
-**结论**：模拟点击本身（Playwright 的 mouse/touch）没问题，问题一直是「坐标系」——截图像素坐标、CSS 视口坐标、iframe 内外坐标、DPR 缩放这四者之间的换算，以及「iframe 内外」这一层。人操作时浏览器自动处理了这些，脚本必须显式写对每一层。
+**结论**：DOM 用于无副作用观察，操作统一走浏览器输入层；移动模式只发送一次 touch，桌面模式只发送一次 mouse。截图像素、CSS 视口、iframe 与 DPR 仍需保持一致。
 
 ## 五、关键配置（config.py）
 
@@ -171,7 +172,7 @@
 
 1、**利用 `next-btn` class 定位翻页**（已实现）：翻页按钮 class 恒定（next-btn），比 OCR 文字（下一页/继续/下一步会变）更可靠。已加 `find_next_button()` 作为 DOM 兜底。
 
-2、**监听网络 API**（已实现）：`wait_for_progress()` 监听本地配置的翻页上报接口特征（`config_platform.py` 的 `PROGRESS_API_MARKS`）或 URL 变化，用于判断「人工介入后页面是否真的变了」。该接口每次翻页/提交都会上报，无需解密 base64，只看请求是否发生即可。替代了原来 `need_human` 用 `input()` 盲目等回车的方式。
+2、**监听网络 API**（已实现）：`wait_for_progress()` 与 `click_and_verify()` 同时观察匹配请求和响应；两者都出现才记为 `progress_response`。不解析、不构造 next 正文，消息仍由页面自身生成。
 
 3、**可视化统计台账**（已实现）：`python report.py` 解析 `action_log.jsonl` 生成 `logs/report.html`，展示统计概览 + 困难样本（带截图）。困难样本判定：
    - `vlm_failed`（**VLM 校验后依然失败**，附 VLM 原始返回内容）—— 最核心的困难样本，见下方「困难样本定义」。
@@ -208,7 +209,11 @@
 
 ## 九、本地回归测试（test_page.html + test_flow.py）
 
-`test_page.html` 内置 7 页模拟流程：开始学习 → 知识点 1 → 反诈案例（关键词陷阱回归页）→ 知识点 2 → 多选题 → 知识点 3 → 已完成，覆盖 start / next / submit / guide_click 各类按钮与题目页，用于本地跑通全流程（不连真实平台）。
+`test_page.html` 按难度递增模拟：文字按钮 → 可见的无文字 `img.btn-next` → 完成四张卡片后才显示的图片按钮 → OCR 陷阱 → 题目页。正常翻页会向本地 `/progress/next` 发请求并收到 204 响应。
+
+快速回归浏览器输入层与状态机：
+
+    .\.venv\Scripts\python.exe -m unittest -v test_interaction.py
 
 跑全流程（自动起本地服务器，无需再手动 `python -m http.server`）：
 

@@ -197,6 +197,10 @@ def main(course_url, enable_vlm=True):
                 # 3.3 决策
                 flow.transition(FlowState.DECIDE, "根据截图、OCR和DOM生成候选")
                 decision_result = decision.decide(screenshot, ocr_results, page.url)
+                if (decision_result.get("source") == "vlm"
+                        and flow.state == FlowState.DECIDE):
+                    # 题目推理发生在 DecisionEngine 内部，返回后补记显式状态。
+                    flow.transition(FlowState.VLM_REASONING, "决策引擎已完成VLM推理")
 
                 # 视觉候选无效时，下一轮优先观察当前活动页内真正可见的 btn-next。
                 # find_next_button 只读取 DOM 边界与可见性，不触发页面脚本。

@@ -9,8 +9,9 @@
   - 低级（纯自动，无需 VLM）：
       page-2 / page-4 内容页 + 顶部"返回"导航干扰 —— 区分"下一页 vs 返回"，
       验证脚本只点底部"下一步"，不点顶部"返回"（y 坐标小于 BACK_BUTTON_Y_RATIO 阈值被过滤）。
-      page-3 知识卡片页 —— 4 张卡片逐个"点击查看"，全部点击过一次以上后出现底部"返回"，
-      由 back_fallback 点击推进。
+      page-2-image 可见的无文字 img.btn-next —— 验证活动页图片按钮的 DOM 观察定位。
+      page-3 知识卡片页 —— 4 张卡片逐个"点击查看"，全部完成后才显示 img.btn-next，
+      验证隐藏按钮不会被提前操作。
   - 中级（困难陷阱样本，需恢复链 + VLM 兜底）：
       page-5 反诈案例页 —— 正文故意含"再三确认"（submit 关键词"确认"的误匹配陷阱，坑 15）
       与"骗子引诱点击"（裸"点击"不命中 guide_click 短语）。脚本会先误点正文"确认"，
@@ -21,7 +22,7 @@
   - OCR 鲁棒性：page-6 字间距过大、page-7 按钮文字换行。
 
   注意：陷阱文本是故意设置的困难样本，不要"改干净"——不同难度的样本页测不同流程：
-  低级页（知识卡片）保持干净正文以顺畅验证 back_fallback；陷阱词集中在 page-5 困难页测试。
+  知识卡片页保持干净正文，以便专门验证“完成前置交互后才显示图片按钮”；陷阱词集中在 page-5。
 -->
 <style>
   * { box-sizing: border-box; }
@@ -59,6 +60,13 @@
     color: #fff;
   }
   .btn:active { opacity: 0.85; }
+  .image-next {
+    display: block;
+    width: 132px;
+    height: 76px;
+    margin: 28px 0 18px auto;
+    cursor: pointer;
+  }
   .option {
     display: block;
     width: 100%;
@@ -148,12 +156,23 @@
       <h2>知识点一：冒充公检法</h2>
       <p>凡是自称公检法机关，要求你转账到"安全账户"的，都是诈骗。</p>
     </div>
-    <button class="btn" onclick="go(3)">下一步</button>
+    <button class="btn" onclick="go('2-image')">下一步</button>
   </section>
 
-  <!-- 第 3 页：知识卡片（低级难度，back_fallback 验证页）
+  <!-- 第 2b 页：简单图片按钮。图片没有文字，只有 img.btn-next 可供 DOM 观察定位。 -->
+  <section class="page" id="page-2-image">
+    <div class="card">
+      <h2>图片翻页按钮</h2>
+      <p>请点击右侧箭头进入下一页。箭头图片本身不包含可供 OCR 定位的文字。</p>
+    </div>
+    <img class="image-next btn-next" alt=""
+         src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='132' height='76' viewBox='0 0 132 76'%3E%3Cpath fill='%23ff8614' stroke='%23fff' stroke-width='4' d='M4 22h70V4l54 34-54 34V54H4z'/%3E%3C/svg%3E"
+         onclick="go(3)">
+  </section>
+
+  <!-- 第 3 页：知识卡片（中等难度，顺序解锁图片按钮）
        4 张卡片需全部"点击查看"，点击后文字变"已查看"（幂等，不再被 guide_click 命中）；
-       全部查看完成后出现底部"返回"按钮，由 back_fallback 点击推进。
+       全部查看完成后才显示无文字 img.btn-next，隐藏期间不得提前触发。
        正文刻意保持干净（不含"点击查看"等 guide_click 关键词），保证低级流程顺畅；
        "点击查看"类陷阱词集中放在 page-5 困难样本页测试。 -->
   <section class="page" id="page-3">
@@ -165,7 +184,9 @@
     <button class="card-item" onclick="openCard(this)">点击查看卡片2：虚假投资</button>
     <button class="card-item" onclick="openCard(this)">点击查看卡片3：冒充客服</button>
     <button class="card-item" onclick="openCard(this)">点击查看卡片4：裸聊敲诈</button>
-    <button class="btn" id="back-btn-3" onclick="go(4)" style="display:none">返回</button>
+    <img class="image-next btn-next" id="next-img-3" alt="" style="display:none"
+         src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='132' height='76' viewBox='0 0 132 76'%3E%3Cpath fill='%23ff8614' stroke='%23fff' stroke-width='4' d='M4 22h70V4l54 34-54 34V54H4z'/%3E%3C/svg%3E"
+         onclick="go(4)">
   </section>
 
   <!-- 第 4 页：内容 2（低级·区分测试 2：顶部"返回" vs 底部"下一步"） -->
@@ -277,7 +298,11 @@
     window.scrollTo(0, 0);
   }
   function go(n) {
-    show('page-' + n);
+    // 模拟真实课程：正常翻页由页面自己的处理程序发送 next 请求，收到回复后再切页。
+    var target = 'page-' + n;
+    fetch('/progress/next?target=' + encodeURIComponent(target), { method: 'POST' })
+      .then(function () { show(target); })
+      .catch(function () { show(target); });
   }
   // 顶部"返回"导航被点击：只显示提示、不跳转（真实平台会返回上一级，这里仅作误点探测）
   function topBack() {
@@ -302,7 +327,7 @@
     btn.textContent = '已查看' + btn.textContent.replace('点击查看', '');
     openedCards += 1;
     if (openedCards >= 4) {
-      document.getElementById('back-btn-3').style.display = 'block';
+      document.getElementById('next-img-3').style.display = 'block';
     }
   }
   // 单选题：选对进下一页，选错跳到"回答错误"页

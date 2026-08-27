@@ -109,7 +109,7 @@ class BrowserController:
         # 用于识别"视频播放器页"（播放按钮是图标 OCR 识别不到）
 
     try_play_video():
-        # 尝试点击常见播放按钮 + 调用 video.play()，返回播放后状态
+        # 只观察常见播放按钮位置，再通过浏览器输入层点击并读取播放状态
         # 多数浏览器禁止无手势自动播放，可能失败，此时提醒用户手动点播放
 
     wait(ms):
@@ -459,19 +459,14 @@ class ActionLogger:
 
         # 3.4 安全校验（URL 白名单 S1，偏离即终止）
 
-        # 3.5 执行操作：
-        #   click   → 多候选逐个 click_and_verify（API/URL/截图变化任一命中即生效）；
-        #             生效→重置 no_progress_count；无效→no_progress_count+1，走分级降级
-        #   wait    → 视频页检测（playing 等待 / paused 自动播放→失败提醒手动）
-        #   need_human → 打印提示 + wait_for_progress 监听 API/URL 自动继续
+        # 3.5 显式状态机执行：
+        #   OBSERVE → DECIDE → ACT → VERIFY；一轮只操作一个候选，失败后重新观察
+        #   VERIFY 以“匹配请求发出 + 收到响应”为首要成功信号，URL/截图变化为普通交互兜底
+        #   wait    → 视频页只观察状态/可见播放控件，不调用 video.play()/element.click()
+        #   need_human → VLM 可用时必须先进入 VLM_REASONING，仍无法处理才 HUMAN
         #   terminate  → _wait_for_next_lesson 等用户打开下一节
         #
-        # 分级降级（no_progress_count 累计）：
-        #   1 → 加长等待重试
-        #   2 → DOM 兜底重新定位
-        #   3 → VLM 语义兜底（失败记为 vlm_failed 困难样本，保留 VLM 返回内容）
-        #   4 → reload 刷新（超过 MAX_RELOAD_COUNT 则停止防封号）
-        #   5 → 人工介入（wait_for_progress 监听，用户操作完自动继续）
+        # 升级顺序：未失败候选 → 当前活动页可见 btn-next → VLM_REASONING → HUMAN
 
         page_count += 1
 
