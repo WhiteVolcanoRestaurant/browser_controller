@@ -115,7 +115,7 @@ PROFILE_DIR = os.path.join(BASE_DIR, "edge_profile")
 
 # Ollama VLM 配置（testVLM.py 与主流程 VLMClient 均从这里读取实际模型）
 OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_MODEL = "llava-phi3"
+OLLAMA_MODEL = "qwen3-vl:4b"
 VLM_TIMEOUT = 60
 # VLM 输入改成手机竖屏比例，避免再做双尺度缩放；
 # OCR/VLM 都在同一尺寸坐标系下，定位更准、显存占用也更小。
