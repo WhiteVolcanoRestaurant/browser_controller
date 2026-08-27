@@ -123,7 +123,6 @@ def main(course_url, enable_vlm=True):
     consecutive_wait_count = 0  # 连续"未匹配目标(决策 wait)"的次数，达到阈值触发 VLM 语义兜底
     failed_candidates = set()
     force_vlm_reason = ""
-    prefer_dom_next = False
     try:
         # 2. 打开课程页面
         page = browser.navigate(course_url)
@@ -196,29 +195,25 @@ def main(course_url, enable_vlm=True):
 
                 # 3.3 决策
                 flow.transition(FlowState.DECIDE, "根据截图、OCR和DOM生成候选")
-                decision_result = decision.decide(screenshot, ocr_results, page.url)
+                # 当前活动页中已真正可见、未遮挡、未禁用的 btn-next 优先级最高。
+                # 隐藏的预置按钮不会通过 find_next_button 的可操作性检查。
+                dom_next = browser.find_next_button()
+                if dom_next:
+                    force_vlm_reason = ""
+                    (dx, dy), meta = dom_next
+                    decision_result = {
+                        "action": "click", "x": dx, "y": dy,
+                        "target": meta.get("cls", "btn-next"),
+                        "confidence": 0.98,
+                        "reason": "活动页存在可见且可操作的翻页元素",
+                        "source": "dom_next",
+                    }
+                else:
+                    decision_result = decision.decide(screenshot, ocr_results, page.url)
                 if (decision_result.get("source") == "vlm"
                         and flow.state == FlowState.DECIDE):
                     # 题目推理发生在 DecisionEngine 内部，返回后补记显式状态。
                     flow.transition(FlowState.VLM_REASONING, "决策引擎已完成VLM推理")
-
-                # 视觉候选无效时，下一轮优先观察当前活动页内真正可见的 btn-next。
-                # find_next_button 只读取 DOM 边界与可见性，不触发页面脚本。
-                if prefer_dom_next:
-                    dom_next = browser.find_next_button()
-                    prefer_dom_next = False
-                    if dom_next:
-                        force_vlm_reason = ""
-                        (dx, dy), meta = dom_next
-                        decision_result = {
-                            "action": "click", "x": dx, "y": dy,
-                            "target": meta.get("cls", "btn-next"),
-                            "confidence": 0.98,
-                            "reason": "视觉候选无效后，活动页出现可见翻页元素",
-                            "source": "dom_next",
-                        }
-                    elif not force_vlm_reason:
-                        force_vlm_reason = "视觉候选无效，且活动页没有可操作的翻页元素"
 
                 if force_vlm_reason:
                     reason = force_vlm_reason
@@ -343,7 +338,6 @@ def main(course_url, enable_vlm=True):
                             failed_candidates.clear()
                             no_progress_count = 0
                             continue
-                        prefer_dom_next = True
                         force_vlm_reason = "当前页面的视觉候选均已验证无效"
                         browser.wait(random.randint(700, 1300))
                         continue
@@ -408,7 +402,6 @@ def main(course_url, enable_vlm=True):
                             no_progress_count = 0
                             continue
                         else:
-                            prefer_dom_next = True
                             if not any(_candidate_key(c) not in failed_candidates
                                        for c in candidates):
                                 force_vlm_reason = "所有视觉候选均未生效"
