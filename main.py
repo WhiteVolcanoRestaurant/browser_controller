@@ -418,11 +418,12 @@ def main(course_url, enable_vlm=True, enable_auto_course_selection=None):
                         break
 
                     flow.transition(FlowState.ACT, f"点击候选：{cand.get('target', 'unknown')}")
+                    clicked_from_url = page.url
                     changed, why = browser.click_and_verify(
-                        x, y, before_image=screenshot, prev_url=page.url)
+                        x, y, before_image=screenshot, prev_url=clicked_from_url)
                     flow.transition(FlowState.VERIFY, f"点击结果：{why}")
                     logger.log(step=page_count, action="click", details={
-                        "page_url": page.url,
+                        "page_url": clicked_from_url,
                         "target": cand.get("target", "unknown"),
                         "x": x, "y": y,
                         "confidence": cand.get("confidence", 0),
@@ -438,6 +439,19 @@ def main(course_url, enable_vlm=True, enable_auto_course_selection=None):
 
                     if changed:
                         print(f"[点击生效] 检测到 {why}")
+                        if decision_result.get("selector_action") == "select_course":
+                            course_name = cand.get("target", "未知课程")
+                            category = decision_result.get("category", "未知分类")
+                            print(f"[自动选课] 开始学习：{course_name}（分类：{category}）")
+                            logger.log(step=page_count, action="course_selected", details={
+                                "page_url": page.url,
+                                "course_name": course_name,
+                                "category": category,
+                                "category_order": decision_result.get("category_order"),
+                                "course_order": decision_result.get("course_order"),
+                                "list_page_url": clicked_from_url,
+                                "verification": why,
+                            })
                         no_progress_count = 0
                         consecutive_wait_count = 0
                         failed_candidates.clear()

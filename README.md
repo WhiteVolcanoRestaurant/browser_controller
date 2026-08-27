@@ -185,6 +185,7 @@ python test_flow.py --no-vlm
 ### 日志与截图
 
 - 操作日志：`logs/action_log.jsonl`（每步 JSON 行）
+- 自动选课成功后会写入 `course_selected` 事件，记录具体课程名、分类、页面顺序和进入后的课程地址。
 - 页面截图：`logs/debug_page_{ts}.png`（含 OCR 时刻）
 - VLM 输入：`logs/vlm_input_{ts}.png`
 

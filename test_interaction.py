@@ -141,6 +141,38 @@ class BrowserInteractionTests(unittest.TestCase):
         self.assertEqual(result["target"], "未完成必修课")
         self.assertEqual(result["category"], "防范诈骗")
 
+    def test_course_selector_uses_top_to_bottom_page_order(self):
+        self.page.set_content("""
+          <style>
+            [role=tab], .van-collapse-item__title, .img-texts-item {
+              display:block; width:360px; min-height:48px; margin:4px;
+            }
+          </style>
+          <div role="tab" aria-selected="true" class="van-tab--active">
+            <span class="completion">1/5</span><span class="name">必修课</span>
+          </div>
+          <section class="van-collapse-item">
+            <div class="van-collapse-item__title" aria-expanded="true">
+              <span class="text">上方未完成分类</span><span class="count">1/3</span>
+            </div>
+            <li class="img-texts-item"><h5 class="title">最上方未完成课程</h5></li>
+            <li class="img-texts-item"><h5 class="title">第二门未完成课程</h5></li>
+            <li class="img-texts-item passed"><h5 class="title">已完成课程</h5></li>
+          </section>
+          <section class="van-collapse-item">
+            <div class="van-collapse-item__title" aria-expanded="true">
+              <span class="text">下方未完成分类</span><span class="count">0/1</span>
+            </div>
+            <li class="img-texts-item"><h5 class="title">下方分类课程</h5></li>
+          </section>
+        """)
+        result = self.controller.find_unfinished_required_course()
+        self.assertEqual(result["action"], "click")
+        self.assertEqual(result["category"], "上方未完成分类")
+        self.assertEqual(result["target"], "最上方未完成课程")
+        self.assertEqual(result["category_order"], 1)
+        self.assertEqual(result["course_order"], 1)
+
     def test_course_selector_expands_incomplete_category_first(self):
         self.page.set_content("""
           <div role="tab" aria-selected="true" class="van-tab--active"

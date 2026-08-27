@@ -452,13 +452,16 @@ class BrowserController:
             };
           }
 
+          // querySelectorAll 保留页面 DOM 顺序：始终从上到下处理第一个未完成分类。
           const entry = incompleteGroups[0];
+          const categoryOrder = groups.indexOf(entry.group) + 1;
           const category = elementName(entry.group, '.text');
           const expanded = entry.title.getAttribute('aria-expanded') === 'true';
           if (!expanded) {
             return target(entry.title, 'expand_category', category, {
               reason: `展开未完成分类“${category}”（${entry.count.done}/${entry.count.total}）`,
               category,
+              category_order: categoryOrder,
               category_progress: entry.count,
               required_progress: requiredProgress,
             });
@@ -466,6 +469,7 @@ class BrowserController:
 
           const courses = Array.from(
             entry.group.querySelectorAll('li.img-texts-item'));
+          // 课程同样按页面从上到下选择；passed（绿色角标）永远跳过。
           const unfinished = courses.find((course) =>
             !course.classList.contains('passed'));
           if (!unfinished) {
@@ -475,12 +479,15 @@ class BrowserController:
             };
           }
           const courseName = elementName(unfinished, '.title');
+          const courseOrder = courses.indexOf(unfinished) + 1;
           if (!courseName) {
             return {action: 'need_human', reason: `分类“${category}”中的未完成课程缺少标题`};
           }
           return target(unfinished, 'select_course', courseName, {
-            reason: `选择分类“${category}”中第一门无绿色角标的必修课`,
+            reason: `从上到下选择分类“${category}”中第一门无绿色角标的必修课`,
             category,
+            category_order: categoryOrder,
+            course_order: courseOrder,
             category_progress: entry.count,
             required_progress: requiredProgress,
           });
