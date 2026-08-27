@@ -4,6 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>课程自动化测试页</title>
+<!--
+  测试页分级说明（合并进单页线性流程，难度递增）：
+  - 低级（纯自动，无需 VLM）：
+      page-2 / page-4 内容页 + 顶部"返回"导航干扰 —— 区分"下一页 vs 返回"，
+      验证脚本只点底部"下一步"，不点顶部"返回"（y 坐标小于 BACK_BUTTON_Y_RATIO 阈值被过滤）。
+      page-3 知识卡片页 —— 4 张卡片逐个"点击查看"，全部点击过一次以上后出现底部"返回"，
+      由 back_fallback 点击推进。
+  - 中级（困难陷阱样本，需恢复链 + VLM 兜底）：
+      page-5 反诈案例页 —— 正文故意含"再三确认"（submit 关键词"确认"的误匹配陷阱，坑 15）
+      与"骗子引诱点击"（裸"点击"不命中 guide_click 短语）。脚本会先误点正文"确认"，
+      验证恢复链 + VLM 语义兜底最终能找到真正的推进按钮"点击了解经过"。
+  - 高级（需 VLM 读题作答 / 无 VLM 转人工）：
+      page-8 多选题 + page-9 单选题答错重答。单选答错会跳"回答错误"页（底部"返回"），
+      点返回回题重答，需 VLM 缓存/识别正确答案才能通过。
+  - OCR 鲁棒性：page-6 字间距过大、page-7 按钮文字换行。
+
+  注意：陷阱文本是故意设置的困难样本，不要"改干净"——不同难度的样本页测不同流程：
+  低级页（知识卡片）保持干净正文以顺畅验证 back_fallback；陷阱词集中在 page-5 困难页测试。
+-->
 <style>
   * { box-sizing: border-box; }
   body {
@@ -55,9 +74,62 @@
   .option.selected { border-color: #3478f6; background: #eef3ff; }
   .q-title { color: #e8552f; font-weight: 600; margin-bottom: 6px; }
   .done { text-align: center; color: #18a058; font-size: 24px; font-weight: 700; padding: 60px 0; }
+
+  /* 顶部"返回"导航（干扰项）：真实平台里是"退出/返回上一级"，不应被自动脚本点击。
+     用 sticky top:0 固定在视口最顶部，y 坐标远小于 BACK_BUTTON_Y_RATIO 阈值，
+     即使走到 back_fallback 也会被位置过滤排除。 */
+  .topnav {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    margin: -24px -20px 16px;   /* 抵消 body padding，占满顶部宽度 */
+    padding: 14px 20px;
+    background: #fff;
+    color: #3478f6;
+    font-size: 17px;
+    font-weight: 500;
+    border-bottom: 1px solid #eee;
+    cursor: pointer;
+  }
+  /* 知识卡片（低级难度）：点击后文字变"已查看"（幂等，不再被 guide_click 误匹配）。
+     选中态必须高对比（深绿底白字）：images_changed 会降到 48x48 灰度比较，
+     浅色选中态灰度差太小会被判定"点击无变化"，导致脚本走恢复链。 */
+  .card-item {
+    display: block;
+    width: 100%;
+    margin: 10px 0;
+    padding: 14px 16px;
+    font-size: 17px;
+    text-align: left;
+    border: 1.5px solid #d9dce1;
+    border-radius: 10px;
+    background: #fff;
+    cursor: pointer;
+  }
+  .card-item.opened {
+    background: #0f7d3f;
+    border-color: #0f7d3f;
+    color: #fff;
+    font-weight: 600;
+  }
+  /* 把"返回"按钮压到视口下半部分（配合 back_fallback 的 y 位置过滤） */
+  .page-spacer { height: 300px; }
+  /* 顶部"返回"被误点时的可见提示（测试观察用；正常流程不会出现） */
+  .hint {
+    display: none;
+    background: #fff3e0;
+    color: #c77700;
+    padding: 10px 14px;
+    margin: 0 0 12px;
+    border-radius: 8px;
+    font-size: 14px;
+  }
 </style>
 </head>
 <body>
+
+  <!-- 顶部"返回"误点提示（全局） -->
+  <div id="topback-hint" class="hint">⚠ 顶部"返回"被点击了——脚本不应点这里（应点底部"下一步"）。</div>
 
   <!-- 第 1 页：开始 -->
   <section class="page active" id="page-1">
@@ -68,60 +140,82 @@
     <button class="btn" onclick="go(2)">开始学习</button>
   </section>
 
-  <!-- 第 2 页：内容 1 -->
+  <!-- 第 2 页：内容 1（低级·区分测试 1：顶部"返回" vs 底部"下一步"）
+       顶部"返回"是导航干扰项，正确行为是点底部"下一步"，不点"返回"。 -->
   <section class="page" id="page-2">
+    <div class="topnav" onclick="topBack()">‹ 返回</div>
     <div class="card">
       <h2>知识点一：冒充公检法</h2>
-      <p>凡是自称公检法机关，要求你转账到“安全账户”的，都是诈骗。</p>
+      <p>凡是自称公检法机关，要求你转账到"安全账户"的，都是诈骗。</p>
     </div>
     <button class="btn" onclick="go(3)">下一步</button>
   </section>
 
-  <!-- 第 3 页：反诈案例（关键词陷阱回归页）
-       正文故意包含"骗子引诱点击""再三确认"等含关键词的句子，
-       验证：guide_click 短语匹配不会命中正文里的裸"点击"；
-       "确认"是 submit 的已知误匹配陷阱（见开发文档坑 15）。 -->
+  <!-- 第 3 页：知识卡片（低级难度，back_fallback 验证页）
+       4 张卡片需全部"点击查看"，点击后文字变"已查看"（幂等，不再被 guide_click 命中）；
+       全部查看完成后出现底部"返回"按钮，由 back_fallback 点击推进。
+       正文刻意保持干净（不含"点击查看"等 guide_click 关键词），保证低级流程顺畅；
+       "点击查看"类陷阱词集中放在 page-5 困难样本页测试。 -->
   <section class="page" id="page-3">
+    <div class="card">
+      <h2>知识卡片：新型诈骗类型</h2>
+      <p>请依次查看以下 4 张知识卡片，全部查看完成后下方会出现"返回"按钮。</p>
+    </div>
+    <button class="card-item" onclick="openCard(this)">点击查看卡片1：刷单返利</button>
+    <button class="card-item" onclick="openCard(this)">点击查看卡片2：虚假投资</button>
+    <button class="card-item" onclick="openCard(this)">点击查看卡片3：冒充客服</button>
+    <button class="card-item" onclick="openCard(this)">点击查看卡片4：裸聊敲诈</button>
+    <button class="btn" id="back-btn-3" onclick="go(4)" style="display:none">返回</button>
+  </section>
+
+  <!-- 第 4 页：内容 2（低级·区分测试 2：顶部"返回" vs 底部"下一步"） -->
+  <section class="page" id="page-4">
+    <div class="topnav" onclick="topBack()">‹ 返回</div>
+    <div class="card">
+      <h2>知识点二：虚假中奖</h2>
+      <p>陌生短信、链接里的"中奖""领奖"信息，基本都带有诈骗目的。</p>
+    </div>
+    <button class="btn" onclick="go(5)">下一步</button>
+  </section>
+
+  <!-- 第 5 页：反诈案例（中级·困难陷阱样本，坑 15）
+       正文故意含"再三确认"（submit 关键词"确认"的误匹配陷阱）和
+       "骗子引诱点击"（裸"点击"不会命中 guide_click 短语）。
+       预期流程：脚本先误点正文"确认"→ 无反应 → 恢复链 + VLM 语义兜底
+       最终找到真正的推进按钮"点击了解经过"。
+       这是"被测试的流程"，不是测试页 bug，请勿改掉陷阱文本。 -->
+  <section class="page" id="page-5">
     <div class="card">
       <h2>案例：出站遭遇诈骗</h2>
       <p>刚出高铁站，还在核对路线的小全，竟然遭遇诈骗了。</p>
       <p>骗子引诱点击陌生链接，骗取银行卡信息，千万别信。</p>
       <p>转账前需要再三确认收款人身份，谨防上当。</p>
     </div>
-    <button class="btn" onclick="go(4)">点击了解经过</button>
+    <button class="btn" onclick="go(6)">点击了解经过</button>
   </section>
 
-  <!-- 第 4 页：内容 2 -->
-  <section class="page" id="page-4">
-    <div class="card">
-      <h2>知识点二：虚假中奖</h2>
-      <p>陌生短信、链接里的“中奖”“领奖”信息，基本都带有诈骗目的。</p>
-    </div>
-    <button class="btn" onclick="go(5)">下一步</button>
-  </section>
-
-  <!-- 第 5 页：OCR 鲁棒性 1 —— 按钮文字字间距过大（OCR 会在字间插空格，如"继  续"） -->
-  <section class="page" id="page-5">
+  <!-- 第 6 页：OCR 鲁棒性 1 —— 按钮文字字间距过大（OCR 会在字间插空格，如"继  续"） -->
+  <section class="page" id="page-6">
     <div class="card">
       <h2>OCR 测试：字间距过大</h2>
       <p>按钮文字两个字间距过大时，OCR 会在字间插入空格（识别成"继  续"），
          匹配前需先去空白。下方按钮文本带空格并加宽字距。</p>
     </div>
-    <button class="btn" style="letter-spacing: 0.25em;" onclick="go(6)">继  续</button>
+    <button class="btn" style="letter-spacing: 0.25em;" onclick="go(7)">继  续</button>
   </section>
 
-  <!-- 第 6 页：OCR 鲁棒性 2 —— 按钮文本换行（OCR 拆成两条互不相连的短文字） -->
-  <section class="page" id="page-6">
+  <!-- 第 7 页：OCR 鲁棒性 2 —— 按钮文本换行（OCR 拆成两条互不相连的短文字） -->
+  <section class="page" id="page-7">
     <div class="card">
       <h2>OCR 测试：按钮文本换行</h2>
       <p>按钮文字被拆成两行时，OCR 会识别成两条短文字，单条都无法命中
          完整按钮关键词，需靠 DOM 兜底/去空白后匹配。</p>
     </div>
-    <button class="btn" onclick="go(7)">继<br>续</button>
+    <button class="btn" onclick="go(8)">继<br>续</button>
   </section>
 
-  <!-- 第 7 页：多选题 -->
-  <section class="page" id="page-7">
+  <!-- 第 8 页：多选题（高级难度，需 VLM 读题作答） -->
+  <section class="page" id="page-8">
     <div class="card">
       <div class="q-title">多选题</div>
       <h2>下面哪些行为可能涉及电信诈骗，需要提高警惕？</h2>
@@ -133,36 +227,91 @@
     <button class="btn" onclick="submitQuiz()">提交</button>
   </section>
 
-  <!-- 第 8 页：内容 3 -->
-  <section class="page" id="page-8">
+  <!-- 第 9 页：单选题（高级难度，需 VLM 读题作答 / 缓存正确答案）
+       选对进 page-10；选错跳到 page-9-wrong（回答错误页），
+       该页无题目关键词、无标准按钮，只有底部"返回"→ back_fallback 点击回题重答。 -->
+  <section class="page" id="page-9">
+    <div class="card">
+      <div class="q-title">单选题</div>
+      <h2>以下哪种做法能最有效防范电信诈骗？</h2>
+      <button class="option" data-opt="A" onclick="singlePick(this, 'B')">A. 接听陌生境外电话并说出短信验证码</button>
+      <button class="option" data-opt="B" onclick="singlePick(this, 'B')">B. 不向任何人透露短信验证码</button>
+      <button class="option" data-opt="C" onclick="singlePick(this, 'B')">C. 把钱转入所谓"安全账户"</button>
+      <button class="option" data-opt="D" onclick="singlePick(this, 'B')">D. 点击陌生短信里的链接领奖</button>
+    </div>
+  </section>
+
+  <!-- 第 9b 页：回答错误（高级难度答错后的"返回"场景）
+       返回按钮通过 .page-spacer 压到视口下半部分（y > BACK_BUTTON_Y_RATIO 阈值），
+       否则内容太短、按钮落在视口上方会被 back_fallback 的位置过滤排除。 -->
+  <section class="page" id="page-9-wrong">
+    <div class="card">
+      <h2>回答错误</h2>
+      <p>你的选择不正确，请点击下方"返回"按钮重新作答。</p>
+      <div class="page-spacer"></div>
+    </div>
+    <button class="btn" onclick="go(9)">返回</button>
+  </section>
+
+  <!-- 第 10 页：内容 3 -->
+  <section class="page" id="page-10">
     <div class="card">
       <h2>知识点三：保护个人信息</h2>
       <p>银行卡密码、短信验证码绝不能告诉他人。</p>
     </div>
-    <button class="btn" onclick="go(9)">下一步</button>
+    <button class="btn" onclick="go(11)">下一步</button>
   </section>
 
-  <!-- 第 9 页：完成 -->
-  <section class="page" id="page-9">
-    <div class="card done">已完成</div>
+  <!-- 第 11 页：完成
+       文字必须能被 END_TEXTS 精确匹配（"课程的学习已完成"），触发 terminate 结束测试；
+       不能用裸"已完成"——END_TEXTS 故意不收录裸"已完成"（防阶段性文案误判），
+       否则脚本会在此页无限循环（VLM 反复把"已完成"文字当按钮点）。 -->
+  <section class="page" id="page-11">
+    <div class="card done">课程的学习已完成</div>
   </section>
 
 <script>
-  function go(n) {
+  function show(id) {
     document.querySelectorAll('.page').forEach(function (p) { p.classList.remove('active'); });
-    document.getElementById('page-' + n).classList.add('active');
+    document.getElementById(id).classList.add('active');
     window.scrollTo(0, 0);
+  }
+  function go(n) {
+    show('page-' + n);
+  }
+  // 顶部"返回"导航被点击：只显示提示、不跳转（真实平台会返回上一级，这里仅作误点探测）
+  function topBack() {
+    document.getElementById('topback-hint').style.display = 'block';
   }
   function pick(btn) {
     btn.classList.toggle('selected');
   }
   function submitQuiz() {
-    var sel = document.querySelectorAll('#page-7 .option.selected');
+    var sel = document.querySelectorAll('#page-8 .option.selected');
     if (sel.length === 0) {
       alert('请至少选择一个选项');
       return;
     }
-    go(8);
+    go(9);
+  }
+  // 知识卡片：点击过一次以上即可（幂等），全部查看后显示"返回"按钮
+  var openedCards = 0;
+  function openCard(btn) {
+    if (btn.classList.contains('opened')) return;
+    btn.classList.add('opened');
+    btn.textContent = '已查看' + btn.textContent.replace('点击查看', '');
+    openedCards += 1;
+    if (openedCards >= 4) {
+      document.getElementById('back-btn-3').style.display = 'block';
+    }
+  }
+  // 单选题：选对进下一页，选错跳到"回答错误"页
+  function singlePick(btn, correct) {
+    if (btn.dataset.opt === correct) {
+      go(10);
+    } else {
+      show('page-9-wrong');
+    }
   }
 </script>
 </body>

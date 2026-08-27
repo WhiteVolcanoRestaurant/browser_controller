@@ -53,6 +53,17 @@ def _wait_for_next_lesson(browser, prev_detail_url):
             return cur
 
 
+def _manual_wait(browser, page_url):
+    # 人工介入：暂停自动操作，等用户手动完成本页（按 Enter 或页面自然变化）。
+    changed, why = browser.wait_for_progress(timeout_ms=180000, prev_url=page_url)
+    if changed and why == "user_enter":
+        print("[继续] 用户按 Enter 唤醒，立即重新识别当前页面。")
+    elif changed:
+        print(f"[继续] 检测到 {why}，页面已变化，继续自动处理。")
+    else:
+        print("[提示] 等待超时，继续循环检测...")
+
+
 def main(course_url, enable_vlm=True):
     # 1. 初始化所有模块
     browser = BrowserController(channel=config.BROWSER_CHANNEL, headless=False)
@@ -280,6 +291,19 @@ def main(course_url, enable_vlm=True):
                                    details={"page_url": page.url,
                                             "target": decision_result.get("target", "unknown"),
                                             "no_progress_count": no_progress_count})
+                        # "返回"保底按钮点击无效：此页大概率没有自动推进路径。
+                        # 不走 VLM/reload 恢复链——reload 会重置页面交互进度，
+                        # 对"返回"场景无意义且可能丢失进度，直接人工介入。
+                        if decision_result.get("source") == "back_fallback":
+                            print("\n" + "=" * 60)
+                            print("[需人工介入] 点击\"返回\"无效果，此页没有可自动推进的路径。")
+                            print("请在浏览器中手动完成本页操作；完成后按 Enter 可立即继续（Ctrl+C 退出）。")
+                            logger.log(step=page_count, action="need_human",
+                                       details={"page_url": page.url,
+                                                "reason": "返回按钮保底点击无效"})
+                            _manual_wait(browser, page.url)
+                            no_progress_count = 0
+                            continue
                         if no_progress_count == 1:
                             # 第 1 级：可能是页面渲染慢/网络慢，加长等待后重试
                             print(f"[恢复] 点击后页面无变化，第 {no_progress_count} 次，加长等待后重试...")
@@ -362,13 +386,7 @@ def main(course_url, enable_vlm=True):
                             logger.log(step=page_count, action="need_human",
                                        details={"page_url": page.url,
                                                 "reason": "多级恢复失败，需人工处理"})
-                            changed, why = browser.wait_for_progress(timeout_ms=180000, prev_url=page.url)
-                            if changed and why == "user_enter":
-                                print("[继续] 用户按 Enter 唤醒，立即重新识别当前页面。")
-                            elif changed:
-                                print(f"[继续] 检测到 {why}，页面已变化，继续自动处理。")
-                            else:
-                                print("[提示] 等待超时，继续循环检测...")
+                            _manual_wait(browser, page.url)
                             no_progress_count = 0
                             continue
 

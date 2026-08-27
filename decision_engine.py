@@ -156,6 +156,28 @@ class DecisionEngine:
                         "confidence": candidates[0]["confidence"],
                         "candidates": candidates}
 
+        # 步骤 5.5：无 VLM 保底——页面只有底部"返回"可点时，把它当作推进按钮。
+        # 反诈案例页典型：正文 + 底部"返回"，没有任何标准按钮。
+        # 保护条件：开关开启 + 课程详情页 URL + "返回"位于视口下半部分
+        #（底部"返回"通常是"回到上一级继续学习"；顶部"返回"是导航/退出，不能点）。
+        if (self.config.ENABLE_BACK_FALLBACK
+                and self.config.COURSE_DETAIL_URL_MARK in (page_url or "")):
+            matched = self.ocr_engine.filter_by_keywords(
+                ocr_results, self.config.BACK_BUTTON_KEYWORDS)
+            if matched:
+                candidates = self._build_candidates(matched)
+                page_h = screenshot.size[1] if screenshot else 0
+                if page_h:
+                    candidates = [c for c in candidates
+                                  if c["y"] > page_h * self.config.BACK_BUTTON_Y_RATIO]
+                if candidates:
+                    return {"action": "click",
+                            "x": candidates[0]["x"], "y": candidates[0]["y"],
+                            "target": candidates[0]["target"],
+                            "confidence": candidates[0]["confidence"],
+                            "candidates": candidates,
+                            "source": "back_fallback"}
+
         # 步骤 6：OCR 无结果时等待（可能是登录页或页面尚未渲染），不触发 VLM
         if not ocr_results:
             return {"action": "wait", "reason": "OCR未识别到文字，等待页面加载或用户登录"}

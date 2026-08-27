@@ -96,6 +96,18 @@ NEXT_BUTTON_CLASS_HINTS = ["next-btn", "next", "btn-next"]
 # 会误判成课程结束直接 terminate。
 END_TEXTS = ["课程的学习已完成", "学习完成", "课程完成", "结束"]
 
+# 无 VLM 模式下的"返回"按钮保底（反诈案例页等纯展示页）。
+# 页面没有任何标准推进按钮（下一页/继续/提交/点击xxx）时，底部唯一的"返回"
+# 通常是"回到上一级继续学习"，点击可推进课程流程（VLM 语义兜底也常判断点它）。
+# 开启后，决策引擎在 guide_click 之后、wait 之前尝试点击"返回"。
+# 注意：故意不放进 TARGET_BUTTONS——DOM 兜底会遍历 TARGET_BUTTONS.values()，
+# 而 DOM 兜底没有位置过滤，会把顶部导航栏的"返回"（退出按钮）也当作候选。
+ENABLE_BACK_FALLBACK = True
+BACK_BUTTON_KEYWORDS = ["返回"]
+# "返回"按钮的 y 坐标必须大于 视口高度 * BACK_BUTTON_Y_RATIO（位于视口下半部分）。
+# 底部"返回"通常是"回到上一级继续学习"；顶部"返回"是导航/退出按钮，不能点。
+BACK_BUTTON_Y_RATIO = 0.4
+
 # 浏览器配置：H5 课程页只有中间一小块，直接用手机视口，
 # 避免 1920x1080 的两侧留白干扰 OCR / VLM 定位，同时截图更小、OCR/VLM 更快。
 BROWSER_CHANNEL = "msedge"
