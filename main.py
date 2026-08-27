@@ -18,6 +18,7 @@ import config
 from action_logger import ActionLogger
 from browser_controller import BrowserController
 from decision_engine import DecisionEngine
+from flow_state import FlowState, FlowStateMachine
 from ocr_engine import OCREngine
 from safety_sandbox import SafetySandbox
 from vlm_client import VLMClient
@@ -64,6 +65,29 @@ def _manual_wait(browser, page_url):
         print("[提示] 等待超时，继续循环检测...")
 
 
+def _candidate_key(candidate):
+    """候选标识容忍相邻轮次 OCR 坐标出现少量像素漂移。"""
+    return (candidate.get("target", ""),
+            int(candidate.get("x", 0)) // 8,
+            int(candidate.get("y", 0)) // 8)
+
+
+def _vlm_before_human(flow, decision, screenshot, ocr_results, page_url, reason):
+    """统一升级入口：VLM 可用时先推理，之后才允许转人工。"""
+    if not decision.vlm_ready:
+        return {"action": "need_human", "reason": reason,
+                "source": "vlm_unavailable"}
+    flow.transition(FlowState.VLM_REASONING, reason)
+    result = decision.semantic_fallback(screenshot, ocr_results, page_url)
+    result["source"] = "vlm"
+    if result.get("action") == "click":
+        return result
+    vlm_reason = result.get("reason") or "VLM 未找到可靠的可点击目标"
+    return {"action": "need_human",
+            "reason": f"{reason}；VLM判断：{vlm_reason}",
+            "source": "vlm"}
+
+
 def main(course_url, enable_vlm=True):
     # 1. 初始化所有模块
     browser = BrowserController(channel=config.BROWSER_CHANNEL, headless=False)
@@ -88,15 +112,18 @@ def main(course_url, enable_vlm=True):
     decision.vlm_ready = vlm_ready
     sandbox = SafetySandbox(config)
     logger = ActionLogger(os.path.join(config.LOG_DIR, "action_log.jsonl"))
+    flow = FlowStateMachine()
 
-    # 两个"进展"计数用途不同（正常跳转/页面变动时都会重置）：
-    # - no_progress_count：决策为 click 但点击后页面无变化（点错/未生效）→ 分级降级恢复
-    # - consecutive_wait_count：决策为 wait（OCR/DOM 均未匹配到目标，无可点击项）→ 连续 N 次触发 VLM 语义兜底
+    # 两个计数用途不同（正常跳转/页面变动时都会重置）：
+    # - no_progress_count：记录当前页面已发生的无效点击，用于日志与人工提示。
+    # - consecutive_wait_count：OCR/DOM 均无候选时，连续等待达到阈值后触发 VLM。
     page_count = 0
     no_progress_count = 0  # 连续"点击了但页面无变化"的次数，用于分级降级恢复
-    reload_count = 0       # 单次运行累计自动刷新次数，超过上限则停止（防封号）
     prev_url = ""          # 上一轮页面 URL，用于检测平台自动跳转
     consecutive_wait_count = 0  # 连续"未匹配目标(决策 wait)"的次数，达到阈值触发 VLM 语义兜底
+    failed_candidates = set()
+    force_vlm_reason = ""
+    prefer_dom_next = False
     try:
         # 2. 打开课程页面
         page = browser.navigate(course_url)
@@ -112,12 +139,14 @@ def main(course_url, enable_vlm=True):
         # 3. 主循环
         while page_count < config.MAX_PAGES:
             try:
+                flow.transition(FlowState.OBSERVE, "开始新一轮页面观察")
                 # 3.0 检测页面 URL 是否自动跳转（真实平台课程完成/视频结束可能自动跳页）
                 current_url = page.url or ""
                 if prev_url and current_url != prev_url:
                     print(f"[跳转] 页面 URL 变化: {prev_url} -> {current_url}")
                     # 页面跳转说明有进展，重置无进展计数，避免跳转瞬间被误判为死循环
                     no_progress_count = 0
+                    failed_candidates.clear()
                     # 页面已变动，重置"未匹配"计数，避免上一页的累计次数触发 VLM
                     consecutive_wait_count = 0
                     # 往回跳：从详情页跳回列表页，判定本课完成
@@ -166,7 +195,32 @@ def main(course_url, enable_vlm=True):
                 })
 
                 # 3.3 决策
+                flow.transition(FlowState.DECIDE, "根据截图、OCR和DOM生成候选")
                 decision_result = decision.decide(screenshot, ocr_results, page.url)
+
+                # 视觉候选无效时，下一轮优先观察当前活动页内真正可见的 btn-next。
+                # find_next_button 只读取 DOM 边界与可见性，不触发页面脚本。
+                if prefer_dom_next:
+                    dom_next = browser.find_next_button()
+                    prefer_dom_next = False
+                    if dom_next:
+                        force_vlm_reason = ""
+                        (dx, dy), meta = dom_next
+                        decision_result = {
+                            "action": "click", "x": dx, "y": dy,
+                            "target": meta.get("cls", "btn-next"),
+                            "confidence": 0.98,
+                            "reason": "视觉候选无效后，活动页出现可见翻页元素",
+                            "source": "dom_next",
+                        }
+                    elif not force_vlm_reason:
+                        force_vlm_reason = "视觉候选无效，且活动页没有可操作的翻页元素"
+
+                if force_vlm_reason:
+                    reason = force_vlm_reason
+                    force_vlm_reason = ""
+                    decision_result = _vlm_before_human(
+                        flow, decision, screenshot, ocr_results, page.url, reason)
 
                 # 3.3.1 兜底：如果 OCR 为空/决策是 wait，但页面里确实有"下一步/下一页"等按钮，
                 #        用 Playwright 直接读 DOM 渲染层的可见文字定位坐标。
@@ -214,6 +268,7 @@ def main(course_url, enable_vlm=True):
                             video = browser.detect_video()
                             if not video.get("has_video"):
                                 print(f"[语义兜底] 连续 {consecutive_wait_count} 次未匹配，让 VLM 判断推进按钮...")
+                                flow.transition(FlowState.VLM_REASONING, "连续未匹配，启动语义推理")
                                 semantic = decision.semantic_fallback(screenshot, ocr_results, page.url)
                                 if semantic.get("action") in ("click", "need_human"):
                                     decision_result = semantic
@@ -222,6 +277,23 @@ def main(course_url, enable_vlm=True):
                     # 决策不是"未匹配 wait"（已匹配到按钮准备点击/其它动作），
                     # 说明未匹配状态解除，重置计数
                     consecutive_wait_count = 0
+
+                # 统一的人工门禁：非 VLM 产生的 need_human，在 VLM 可用时必须先推理。
+                if (decision_result.get("action") == "need_human"
+                        and decision_result.get("source") not in ("vlm", "vlm_unavailable")):
+                    original_reason = decision_result.get("reason", "当前页面无法可靠自动处理")
+                    reasoned = _vlm_before_human(
+                        flow, decision, screenshot, ocr_results, page.url, original_reason)
+                    # 非课程详情页需要用户选择课程；VLM只观察和解释，不自动选项目。
+                    if (config.COURSE_DETAIL_URL_MARK not in (page.url or "")
+                            and reasoned.get("action") == "click"):
+                        decision_result = {
+                            "action": "need_human",
+                            "reason": f"{original_reason}；VLM已完成观察，非课程详情页不自动选择项目",
+                            "source": "vlm",
+                        }
+                    else:
+                        decision_result = reasoned
 
                 # 3.4 通用安全校验（URL 白名单 S1）
                 viewport = browser.get_viewport_size()
@@ -252,161 +324,96 @@ def main(course_url, enable_vlm=True):
                               f"({_c.get('x')},{_c.get('y')}) "
                               f"置信度: {_c.get('confidence', 0):.2f}")
 
-                    # 多候选试错：同一关键词命中多个位置时，逐个点击并验证，
-                    # 点一个无反应就换下一个，避免"找辅导员确认"这种误匹配卡死。
-                    clicked_ok = False
-                    for cand in candidates:
-                        x, y = cand["x"], cand["y"]
-
-                        # 坐标二次校验（S2）
-                        ok, reason = sandbox.validate_coordinates(x, y, viewport[0], viewport[1])
-                        if not ok:
+                    # 保留最新版候选池的排序结果，但一次观察只操作一个候选。
+                    available = [c for c in candidates
+                                 if _candidate_key(c) not in failed_candidates]
+                    if not available:
+                        if decision_result.get("source") == "vlm":
+                            human_reason = "VLM选择了已验证无效的候选，无法继续可靠操作"
+                            flow.transition(FlowState.HUMAN, human_reason)
+                            logger.log(step=page_count, action="need_human",
+                                       details={"page_url": page.url,
+                                                "reason": human_reason})
+                            print(f"[需人工介入] {human_reason}")
+                            _manual_wait(browser, page.url)
+                            failed_candidates.clear()
+                            no_progress_count = 0
                             continue
-                        # 操作频率（S3）
-                        ok, reason = sandbox.validate_rate_limit()
-                        if not ok:
-                            browser.wait(2000)
-                            continue
-                        # 操作次数上限（S4）
-                        ok, reason = sandbox.validate_operation_count()
-                        if not ok:
-                            break
+                        prefer_dom_next = True
+                        force_vlm_reason = "当前页面的视觉候选均已验证无效"
+                        browser.wait(random.randint(700, 1300))
+                        continue
 
-                        # 点击并用 expect_request 包裹（监听在点击同时生效）验证是否推进。
-                        # 内部会执行点击；验证信号：本地配置的推进 API > URL 变化 > 截图内容变化。
-                        changed, why = browser.click_and_verify(
-                            x, y, before_image=screenshot, prev_url=page.url)
-                        logger.log(step=page_count, action="click", details={
-                            "page_url": page.url,
-                            "target": cand.get("target", "unknown"),
-                            "x": x, "y": y,
-                            "confidence": cand.get("confidence", 0),
-                            "source": decision_result.get("source", "ocr_or_vlm"),
-                            "candidates": [{
-                                "target": _c.get("target"),
-                                "x": _c.get("x"), "y": _c.get("y"),
-                                "confidence": _c.get("confidence", 0),
-                            } for _c in candidates],
-                        })
-                        if changed:
-                            clicked_ok = True
-                            print(f"[点击生效] 检测到 {why}")
-                            break
-                        print(f"[候选] 点击 \"{cand.get('target')}\" 无反应，尝试下一个候选...")
+                    cand = available[0]
+                    x, y = cand["x"], cand["y"]
+                    ok, reason = sandbox.validate_coordinates(x, y, viewport[0], viewport[1])
+                    if not ok:
+                        failed_candidates.add(_candidate_key(cand))
+                        continue
+                    ok, reason = sandbox.validate_rate_limit()
+                    if not ok:
+                        browser.wait(random.randint(900, 1500))
+                        continue
+                    ok, reason = sandbox.validate_operation_count()
+                    if not ok:
+                        flow.transition(FlowState.ERROR, reason)
+                        break
 
-                    if clicked_ok:
-                        no_progress_count = 0  # 有进展，重置计数
-                        consecutive_wait_count = 0  # 页面已变动，重置"未匹配"计数
-                        # 防封号：随机延迟模拟真人学习
-                        random_delay = random.uniform(config.MIN_DELAY_SEC, config.MAX_DELAY_SEC)
-                        browser.wait(int(random_delay * 1000))
+                    flow.transition(FlowState.ACT, f"点击候选：{cand.get('target', 'unknown')}")
+                    changed, why = browser.click_and_verify(
+                        x, y, before_image=screenshot, prev_url=page.url)
+                    flow.transition(FlowState.VERIFY, f"点击结果：{why}")
+                    logger.log(step=page_count, action="click", details={
+                        "page_url": page.url,
+                        "target": cand.get("target", "unknown"),
+                        "x": x, "y": y,
+                        "confidence": cand.get("confidence", 0),
+                        "source": decision_result.get("source", "ocr_or_vlm"),
+                        "result": why,
+                        "candidates": [{
+                            "target": _c.get("target"),
+                            "x": _c.get("x"), "y": _c.get("y"),
+                            "confidence": _c.get("confidence", 0),
+                        } for _c in candidates],
+                    })
+
+                    if changed:
+                        print(f"[点击生效] 检测到 {why}")
+                        no_progress_count = 0
+                        consecutive_wait_count = 0
+                        failed_candidates.clear()
+                        browser.wait(int(random.uniform(
+                            config.MIN_DELAY_SEC, config.MAX_DELAY_SEC) * 1000))
                     else:
+                        failed_candidates.add(_candidate_key(cand))
                         no_progress_count += 1
                         logger.log(step=page_count, action="click_no_effect",
                                    details={"page_url": page.url,
-                                            "target": decision_result.get("target", "unknown"),
+                                            "target": cand.get("target", "unknown"),
                                             "no_progress_count": no_progress_count})
-                        # "返回"保底按钮点击无效：此页大概率没有自动推进路径。
-                        # 不走 VLM/reload 恢复链——reload 会重置页面交互进度，
-                        # 对"返回"场景无意义且可能丢失进度，直接人工介入。
-                        if decision_result.get("source") == "back_fallback":
-                            print("\n" + "=" * 60)
-                            print("[需人工介入] 点击\"返回\"无效果，此页没有可自动推进的路径。")
-                            print("请在浏览器中手动完成本页操作；完成后按 Enter 可立即继续（Ctrl+C 退出）。")
+                        if decision_result.get("source") == "vlm":
+                            # VLM已经完成推理且目标验证失败，可以直接进入人工，不再循环调用VLM。
+                            human_reason = "VLM给出的目标点击后没有产生页面变化"
+                            flow.transition(FlowState.HUMAN, human_reason)
                             logger.log(step=page_count, action="need_human",
                                        details={"page_url": page.url,
-                                                "reason": "返回按钮保底点击无效"})
+                                                "reason": human_reason})
+                            print("[需人工介入] VLM目标未产生页面变化，请手动完成本页。")
                             _manual_wait(browser, page.url)
-                            no_progress_count = 0
-                            continue
-                        if no_progress_count == 1:
-                            # 第 1 级：可能是页面渲染慢/网络慢，加长等待后重试
-                            print(f"[恢复] 点击后页面无变化，第 {no_progress_count} 次，加长等待后重试...")
-                            browser.wait(8000)
-                            continue
-                        elif no_progress_count == 2:
-                            # 第 2 级：换目标重定位（DOM 兜底重新找按钮坐标）
-                            print(f"[恢复] 第 {no_progress_count} 次无进展，尝试 DOM 兜底重新定位...")
-                            dom_keywords = [k for g in config.TARGET_BUTTONS.values() for k in g]
-                            dom_found = browser.find_text_element_center(dom_keywords)
-                            if dom_found:
-                                (nx, ny), meta = dom_found
-                                print(f"[恢复] DOM 重定位到 \"{meta.get('hit')}\" @ ({nx},{ny})，重试点击...")
-                                browser.click(nx, ny)
-                                browser.wait_for_network_idle(timeout=10000)
-                                browser.wait(3000)
-                            continue
-                        elif no_progress_count == 3:
-                            # 第 3 级：VLM 语义兜底——点击无效说明点错了目标，
-                            # 让 VLM 看页面找真正的推进元素（如知识卡片"请点击查看"）。
-                            # 必须放在 reload 之前：reload 会重置页面交互进度（知识卡片查看状态等）。
-                            print(f"[恢复] 第 {no_progress_count} 次无进展，让 VLM 判断真正的推进元素...")
-                            fresh_shot = browser.screenshot()
-                            fresh_ocr = ocr.recognize(fresh_shot)
-                            semantic = decision.semantic_fallback(fresh_shot, fresh_ocr, page.url)
-                            vlm_raw = decision.last_vlm_raw
-                            if semantic.get("action") == "click":
-                                sx, sy = semantic.get("x"), semantic.get("y")
-                                print(f"[恢复] VLM 找到目标 \"{semantic.get('target')}\" @ ({sx},{sy})，点击...")
-                                ok2, why2 = browser.click_and_verify(
-                                    sx, sy, before_image=fresh_shot, prev_url=page.url)
-                                if ok2:
-                                    print(f"[恢复] VLM 目标点击生效（{why2}）。")
-                                    no_progress_count = 0
-                                    continue
-                                # VLM 给出了目标但点击仍无效 → 记为困难样本（保留 VLM 返回内容）
-                                print("[恢复] VLM 目标点击仍无效果，记为困难样本。")
-                                logger.log(step=page_count, action="vlm_failed",
-                                           details={"page_url": page.url,
-                                                    "target": semantic.get("target"),
-                                                    "reason": semantic.get("reason"),
-                                                    "vlm_raw": vlm_raw,
-                                                    "ocr_texts": [r.get("text") for r in fresh_ocr[:20]]})
-                                no_progress_count += 1
-                                continue
-                            # VLM 给不出可点目标（need_human / VLM 不可用）→ 记为困难样本
-                            print("[恢复] VLM 无法判断推进元素，记为困难样本。")
-                            logger.log(step=page_count, action="vlm_failed",
-                                       details={"page_url": page.url,
-                                                "reason": semantic.get("reason"),
-                                                "vlm_raw": vlm_raw,
-                                                "ocr_texts": [r.get("text") for r in fresh_ocr[:20]]})
-                            no_progress_count += 1
-                            continue
-                        elif no_progress_count == 4:
-                            # 第 4 级：刷新页面恢复（最后手段！会重置交互进度，且有上限防封号）。
-                            reload_count += 1
-                            if reload_count > config.MAX_RELOAD_COUNT:
-                                logger.log(step=page_count, action="blocked",
-                                           details={"page_url": page.url,
-                                                    "reason": f"自动刷新次数超过上限({config.MAX_RELOAD_COUNT})，停止防封号"})
-                                print("\n" + "=" * 60)
-                                print(f"[停止] 自动刷新已达 {reload_count} 次，超过上限 {config.MAX_RELOAD_COUNT}。")
-                                print("为避免被识别为脚本封号，已停止运行。请手动检查页面。")
-                                break
-                            print(f"[恢复] 第 {no_progress_count} 次无进展，刷新页面（第 {reload_count}/{config.MAX_RELOAD_COUNT} 次）...")
-                            if browser.reload():
-                                browser.wait_for_network_idle(timeout=15000)
-                                browser.wait(3000)
-                                print("[恢复] 页面已刷新，重置无进展计数。")
-                            else:
-                                print("[恢复] 刷新页面失败。")
+                            failed_candidates.clear()
                             no_progress_count = 0
                             continue
                         else:
-                            # 第 5 级：人工介入（不再 reload，保住已有进度）
-                            print("\n" + "=" * 60)
-                            print("[需人工介入] 页面多次点击无进展且 VLM 无法判断（如需逐个点击的知识卡片）。")
-                            print("请在浏览器中手动完成本页操作；完成后按 Enter 可立即继续，或等脚本自动检测到翻页（Ctrl+C 退出）。")
-                            logger.log(step=page_count, action="need_human",
-                                       details={"page_url": page.url,
-                                                "reason": "多级恢复失败，需人工处理"})
-                            _manual_wait(browser, page.url)
-                            no_progress_count = 0
-                            continue
+                            prefer_dom_next = True
+                            if not any(_candidate_key(c) not in failed_candidates
+                                       for c in candidates):
+                                force_vlm_reason = "所有视觉候选均未生效"
+                        browser.wait(random.randint(700, 1400))
+                        continue
 
                 elif action == "wait":
                     reason = decision_result.get("reason", "")
+                    flow.transition(FlowState.WAIT, reason or "等待页面变化")
                     # 视频页检测：OCR 匹配不到目标时，可能页面里嵌了视频播放器
                     # （播放按钮是图形图标 OCR 识别不到；播放中画面无文字按钮）。
                     if "未匹配" in reason:
@@ -426,22 +433,16 @@ def main(course_url, enable_vlm=True):
                                            details={"page_url": page.url, "auto_play": True})
                                 browser.wait(10000)
                                 continue
-                            print("\n" + "=" * 60)
-                            print("[需人工介入] 检测到视频播放器，且无法自动播放。")
-                            print("请在浏览器中手动点击播放按钮，脚本检测到播放后会自动继续（按 Ctrl+C 可退出）。")
-                            logger.log(step=page_count, action="need_human",
-                                       details={"page_url": page.url, "reason": "视频需手动播放"})
-                            if browser.wait_for_video_playing(timeout_ms=180000):
-                                print("[继续] 检测到视频开始播放，等待播放结束...")
-                                browser.wait(5000)
-                            else:
-                                print("[提示] 等待播放超时，继续循环检测...")
+                            # 下一轮用最新截图先请求 VLM；VLM仍无法定位时才进入 HUMAN。
+                            force_vlm_reason = "检测到视频，但可见播放控件无法通过浏览器输入启动"
                             continue
                     logger.log(step=page_count, action="wait",
                                details={"page_url": page.url, "reason": reason})
                     browser.wait(5000)
 
                 elif action == "need_human":
+                    flow.transition(FlowState.HUMAN,
+                                    decision_result.get("reason", "需要人工处理"))
                     # 检测到题目但 VLM 无法确定答案：提醒用户手动介入，
                     # 并监听 next API / URL 变化自动感知"用户已操作完成"。
                     logger.log(step=page_count, action="need_human",
@@ -465,11 +466,14 @@ def main(course_url, enable_vlm=True):
                     continue
 
                 elif action == "error":
+                    flow.transition(FlowState.ERROR,
+                                    decision_result.get("reason", "未知错误"))
                     logger.log(step=page_count, action="error",
                                details={"page_url": page.url, "reason": decision_result.get("reason")})
                     break
 
                 elif action == "terminate":
+                    flow.transition(FlowState.COMPLETE, "检测到课程完成")
                     logger.log(step=page_count, action="terminated",
                                details={"page_url": page.url})
                     # 正常完成：不退出，等待用户打开下一节网课

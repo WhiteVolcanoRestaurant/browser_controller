@@ -86,7 +86,8 @@ class DecisionEngine:
 
     def _vlm_disabled_result(self):
         return {"action": "need_human",
-                "reason": "VLM 未启用/不可用，请人工处理此页"}
+                "reason": "VLM 未启用/不可用，请人工处理此页",
+                "source": "vlm_unavailable"}
 
     def decide(self, screenshot, ocr_results, page_url):
         # 每条文本先去掉内部空白（OCR 会在字距大的字之间插入空格，如"继  续"），
@@ -287,7 +288,8 @@ class DecisionEngine:
             return {"action": action,
                     "target": decision.get("target_text", ""),
                     "confidence": confidence,
-                    "reason": decision.get("reason")}
+                    "reason": decision.get("reason"),
+                    "source": "vlm"}
 
         # click：在 OCR 结果中反查 target_text，得到精确点击坐标
         target_text = (decision.get("target_text") or "").strip()
@@ -302,4 +304,4 @@ class DecisionEngine:
         print(f"[OCR] 反查成功: \"{target_text}\" -> 匹配 \"{located['text']}\" @ ({cx}, {cy})")
         return {"action": "click", "x": cx, "y": cy,
                 "target": located["text"], "confidence": confidence,
-                "reason": decision.get("reason")}
+                "reason": decision.get("reason"), "source": "vlm"}
