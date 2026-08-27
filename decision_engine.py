@@ -94,34 +94,53 @@ class DecisionEngine:
         all_text = " ".join(self.ocr_engine.compact_text(r.get("text", ""))
                             for r in ocr_results)
 
-        # 步骤 1：优先匹配"推进进度"按钮（start/next）。学习内容页最明确的信号。
-        # 必须排在结束检测之前：阶段性完成页会同时出现"恭喜你，你已完成了本微课"
-        # 与"下一页"（接着进测验），有"下一页"就优先点击推进，而不是误判成课程结束；
-        # 真正的结束页是"课程的学习已完成"正文 + "返回列表"按钮（没有"下一页"）。
-        # 也必须放在题目检测之前：内容页文本里可能含"选择"等词，先走题目检测会误判成题目页。
-        for priority in ("start", "next"):
-            keywords = self.config.TARGET_BUTTONS[priority]
-            matched = self.ocr_engine.filter_by_keywords(ocr_results, keywords)
-            if not matched:
-                continue
-            candidates = self._build_candidates(matched)
-            if candidates:
-                return {"action": "click",
-                        "x": candidates[0]["x"], "y": candidates[0]["y"],
-                        "target": candidates[0]["target"],
-                        "confidence": candidates[0]["confidence"],
-                        "candidates": candidates}
-            # 低置信度：继续尝试下一个优先级
+        # 步骤 1：收集全部按钮类候选（start/next/submit/guide_click）合并成一个候选池。
+        # 排序规则：类别优先（类别顺序）、同类从下到上（filter_by_keywords 已按 y 降序）。
+        # 这样"全部查看后才可以继续进行课程"（含"继续"）与"点击翻转"（以"点击"开头）
+        # 会同时进入候选池：先点前者无效时，多候选试错能立即试后者，无需等到 VLM 兜底。
+        pool = self._collect_button_candidates(
+            ocr_results, ("start", "next", "submit", "guide_click"))
 
-        # 步骤 2：结束检测。没有可点的翻页按钮时才检查结束标志。
+        if pool:
+            top_group = pool[0].get("_group")
+            # 最高命中的类别是 start/next 时，直接点击（跳过结束/题目检测）：
+            # - "下一页"必须优先于结束检测：阶段性完成页会同时出现"恭喜你，你已完成了本微课"
+            #   与"下一页"（接着进测验），有"下一页"就优先点击推进，而不是误判成课程结束；
+            # - "下一页"必须优先于题目检测：内容页文本里可能含"选择"等词，
+            #   先走题目检测会误判成题目页。
+            if top_group in ("start", "next"):
+                return {"action": "click",
+                        "x": pool[0]["x"], "y": pool[0]["y"],
+                        "target": pool[0]["target"],
+                        "confidence": pool[0]["confidence"],
+                        "candidates": pool}
+            # 最高命中的类别是 submit/guide_click：先做结束检测与题目检测（保持原有优先级）。
+            # 结束标志只认正文"课程的学习已完成"等（按钮"返回列表"可能与其它页面内容冲突，
+            # 不能用按钮文字判定；也不用裸"已完成"，阶段性文案"你已完成了本微课"会误判）。
+            if any(et in all_text for et in self.config.END_TEXTS):
+                return {"action": "terminate", "target": "", "confidence": 1.0,
+                        "reason": "检测到课程完成标志"}
+            # 题目页有"提交"按钮，必须先交给 VLM 读题作答，不能直接点提交。
+            if any(k in all_text for k in self.config.QUESTION_KEYWORDS):
+                result = self._call_vlm_fallback(screenshot, ocr_results, page_url)
+                if result.get("action") in ("error", "wait"):
+                    return {"action": "need_human",
+                            "reason": result.get("reason", "检测到题目但无法自动作答")}
+                return result
+            return {"action": "click",
+                    "x": pool[0]["x"], "y": pool[0]["y"],
+                    "target": pool[0]["target"],
+                    "confidence": pool[0]["confidence"],
+                    "candidates": pool}
+
+        # 步骤 2：没有任何按钮候选时的结束检测。
         # 结束标志只认正文"课程的学习已完成"等（按钮"返回列表"可能与其它页面内容冲突，
         # 不能用按钮文字判定；也不用裸"已完成"，阶段性文案"你已完成了本微课"会误判）。
         if any(et in all_text for et in self.config.END_TEXTS):
             return {"action": "terminate", "target": "", "confidence": 1.0,
                     "reason": "检测到课程完成标志"}
 
-        # 步骤 3：题目检测（VLM）。没有明确翻页按钮时，才检查是否题目页，
-        #        交给 VLM 用"逻辑能力"读题作答。
+        # 步骤 3：无按钮候选时的题目检测（VLM），交给 VLM 用"逻辑能力"读题作答。
         if any(k in all_text for k in self.config.QUESTION_KEYWORDS):
             result = self._call_vlm_fallback(screenshot, ocr_results, page_url)
             if result.get("action") in ("error", "wait"):
@@ -129,34 +148,7 @@ class DecisionEngine:
                         "reason": result.get("reason", "检测到题目但无法自动作答")}
             return result
 
-        # 步骤 4：submit 按钮（提交/确认/确定）——非题目页的确认按钮
-        matched = self.ocr_engine.filter_by_keywords(
-            ocr_results, self.config.TARGET_BUTTONS["submit"])
-        if matched:
-            candidates = self._build_candidates(matched)
-            if candidates:
-                return {"action": "click",
-                        "x": candidates[0]["x"], "y": candidates[0]["y"],
-                        "target": candidates[0]["target"],
-                        "confidence": candidates[0]["confidence"],
-                        "candidates": candidates}
-
-        # 步骤 5：引导点击（"点击了解/点击查看"等引导语按钮）——标准翻页/提交都没有时，
-        #        尝试点击页面底部的"点击 xxx"引导元素（反诈案例页常见，如"点击了解经过"）。
-        #        排 submit 之后、wait 之前：无 VLM 模式下推进的最后一次机会；
-        #        候选按从下到上排序（filter_by_keywords），先点最靠下的引导元素。
-        matched = self.ocr_engine.filter_by_keywords(
-            ocr_results, self.config.TARGET_BUTTONS["guide_click"])
-        if matched:
-            candidates = self._build_candidates(matched)
-            if candidates:
-                return {"action": "click",
-                        "x": candidates[0]["x"], "y": candidates[0]["y"],
-                        "target": candidates[0]["target"],
-                        "confidence": candidates[0]["confidence"],
-                        "candidates": candidates}
-
-        # 步骤 5.5：无 VLM 保底——页面只有底部"返回"可点时，把它当作推进按钮。
+        # 步骤 4：无 VLM 保底——页面只有底部"返回"可点时，把它当作推进按钮。
         # 反诈案例页典型：正文 + 底部"返回"，没有任何标准按钮。
         # 保护条件：开关开启 + 课程详情页 URL + "返回"位于视口下半部分
         #（底部"返回"通常是"回到上一级继续学习"；顶部"返回"是导航/退出，不能点）。
@@ -178,11 +170,35 @@ class DecisionEngine:
                             "candidates": candidates,
                             "source": "back_fallback"}
 
-        # 步骤 6：OCR 无结果时等待（可能是登录页或页面尚未渲染），不触发 VLM
+        # 步骤 5：OCR 无结果时等待（可能是登录页或页面尚未渲染），不触发 VLM
         if not ocr_results:
             return {"action": "wait", "reason": "OCR未识别到文字，等待页面加载或用户登录"}
 
         return {"action": "wait", "reason": "未匹配到任何目标"}
+
+    def _collect_button_candidates(self, ocr_results, groups, limit=5):
+        # 合并多类别按钮候选：类别优先（groups 顺序）、同类从下到上
+        #（filter_by_keywords 已按 y 降序返回）。
+        # guide_click 额外放宽为"以'点击'开头"的文字（覆盖"点击翻转"等不在关键词表的按钮）。
+        # 去重：同一坐标只保留一次（如"继续学习"会同时命中 start 的"继续学习"与 next 的"继续"）。
+        pool = []
+        seen = set()
+        for group in groups:
+            keywords = self.config.TARGET_BUTTONS[group]
+            prefix = None
+            if group == "guide_click":
+                prefix = getattr(self.config, "GUIDE_CLICK_PREFIX", None)
+            matched = self.ocr_engine.filter_by_keywords(ocr_results, keywords, prefix=prefix)
+            for m in self._build_candidates(matched, limit=limit):
+                key = (m["x"], m["y"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                m["_group"] = group
+                pool.append(m)
+                if len(pool) >= limit:
+                    return pool
+        return pool
 
     def _build_candidates(self, matched, limit=3):
         # 把 OCR 匹配结果转成候选点击坐标列表（按置信度降序，最多 limit 个）。

@@ -242,6 +242,16 @@ def main(course_url, enable_vlm=True):
                             "confidence": decision_result.get("confidence", 0),
                         }]
 
+                    # 输出本次点击的全部候选内容（调试/分析用）：
+                    # 候选 = 关键词过滤命中的 OCR 文字（最多 3 个）。
+                    # 未命中任何关键词的按钮（如"点击翻转"）不会出现在这里，
+                    # 此时应检查 config.TARGET_BUTTONS 是否覆盖了该按钮关键词。
+                    print(f"[候选] 本次点击候选 {len(candidates)} 个:")
+                    for _i, _c in enumerate(candidates, 1):
+                        print(f"       {_i}. \"{_c.get('target')}\" @ "
+                              f"({_c.get('x')},{_c.get('y')}) "
+                              f"置信度: {_c.get('confidence', 0):.2f}")
+
                     # 多候选试错：同一关键词命中多个位置时，逐个点击并验证，
                     # 点一个无反应就换下一个，避免"找辅导员确认"这种误匹配卡死。
                     clicked_ok = False
@@ -272,6 +282,11 @@ def main(course_url, enable_vlm=True):
                             "x": x, "y": y,
                             "confidence": cand.get("confidence", 0),
                             "source": decision_result.get("source", "ocr_or_vlm"),
+                            "candidates": [{
+                                "target": _c.get("target"),
+                                "x": _c.get("x"), "y": _c.get("y"),
+                                "confidence": _c.get("confidence", 0),
+                            } for _c in candidates],
                         })
                         if changed:
                             clicked_ok = True

@@ -137,24 +137,31 @@ class OCREngine:
         # str.split() 默认按 Unicode 空白切分（含全角空格 \u3000）。
         return "".join((text or "").split())
 
-    def filter_by_keywords(self, ocr_results, keywords):
+    def filter_by_keywords(self, ocr_results, keywords, prefix=None):
         # 模糊匹配（text 包含任一关键词），按"从下到上"（y 坐标降序）返回。
         # 匹配前先去掉文本内所有空白（OCR 会在字距大的字之间插入空格，如"继  续"）。
         # 推进/翻页按钮通常在页面底部、正文在上方，从下到上优先尝试，
         # 避免正文里的误匹配词（如"再三确认"）排在真实按钮前面被先点。
         # 关键：排除否定形式（如"不确定"不应命中"确定"），避免误点。
+        # prefix：额外匹配"以 prefix 开头"的文字（如引导按钮"点击翻转"不在关键词表里，
+        #         但以"点击"开头即可视为引导点击按钮）；否定形式（如"不点击"）天然不满足前缀。
         matched = []
         for r in ocr_results:
             compact = self.compact_text(r.get("text", ""))
             if not compact:
                 continue
+            hit = None
             for k in keywords:
                 if k in compact:
                     # "不" + 关键词 出现在 text 里，说明是否定形式（不确定/不提交等），跳过
                     if ("不" + k) in compact:
                         continue
-                    matched.append(r)
+                    hit = k
                     break
+            if hit is None and prefix and compact.startswith(prefix):
+                hit = prefix
+            if hit is not None:
+                matched.append(r)
         # 空 bbox（v3 解析可能无坐标）排最后，避免 get_center_point 除零
         matched.sort(key=lambda r: self.get_center_point(r["bbox"])[1]
                      if r.get("bbox") else -1, reverse=True)
