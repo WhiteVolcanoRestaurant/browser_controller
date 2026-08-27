@@ -12,6 +12,7 @@ class FlowState(str, Enum):
     ACT = "act"
     VERIFY = "verify"
     WAIT = "wait"
+    VIDEO = "video"
     VLM_REASONING = "vlm_reasoning"
     HUMAN = "human"
     COMPLETE = "complete"
@@ -30,9 +31,12 @@ class FlowStateMachine:
         FlowState.ACT: {FlowState.VERIFY, FlowState.ERROR},
         FlowState.VERIFY: {FlowState.OBSERVE, FlowState.VLM_REASONING,
                            FlowState.HUMAN, FlowState.WAIT, FlowState.ERROR},
-        FlowState.WAIT: {FlowState.OBSERVE, FlowState.VLM_REASONING, FlowState.HUMAN},
+        FlowState.WAIT: {FlowState.OBSERVE, FlowState.VLM_REASONING, FlowState.HUMAN,
+                         FlowState.VIDEO},
+        FlowState.VIDEO: {FlowState.OBSERVE, FlowState.WAIT, FlowState.VLM_REASONING,
+                          FlowState.HUMAN, FlowState.ERROR},
         FlowState.VLM_REASONING: {FlowState.ACT, FlowState.WAIT, FlowState.HUMAN,
-                                  FlowState.OBSERVE, FlowState.ERROR},
+                                  FlowState.OBSERVE, FlowState.ERROR, FlowState.VIDEO},
         FlowState.HUMAN: {FlowState.OBSERVE, FlowState.COMPLETE, FlowState.ERROR},
         FlowState.COMPLETE: {FlowState.OBSERVE},
         FlowState.ERROR: {FlowState.OBSERVE, FlowState.HUMAN},

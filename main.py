@@ -431,22 +431,41 @@ def main(course_url, enable_vlm=True):
                     if "未匹配" in reason:
                         video = browser.detect_video()
                         if video.get("has_video"):
+                            # 进入独立的视频处理状态，明确"视频播放/等待播完"这一工作流阶段
+                            flow.transition(FlowState.VIDEO, "检测到视频播放器，进入视频处理")
                             if video.get("playing"):
-                                # 视频正在播放：不打扰，等待播放结束，播放完出现按钮后自动继续
+                                # 视频已在播放：不打扰，直接进入等待播完阶段
                                 logger.log(step=page_count, action="video_playing",
                                            details={"page_url": page.url})
-                                browser.wait(10000)
-                                continue
-                            # 未播放：先尝试自动播放，失败则提醒用户手动点播放
-                            played = browser.try_play_video()
-                            if played.get("playing"):
-                                print("[视频] 已自动触发播放，等待播放结束...")
-                                logger.log(step=page_count, action="video_playing",
-                                           details={"page_url": page.url, "auto_play": True})
-                                browser.wait(10000)
-                                continue
-                            # 下一轮用最新截图先请求 VLM；VLM仍无法定位时才进入 HUMAN。
-                            force_vlm_reason = "检测到视频，但可见播放控件无法通过浏览器输入启动"
+                            else:
+                                # 未播放：先尝试自动播放，失败则转 VLM 推理、仍失败才人工
+                                played = browser.try_play_video()
+                                if played.get("playing"):
+                                    print("[视频] 已自动触发播放，等待播放结束...")
+                                    logger.log(step=page_count, action="video_playing",
+                                               details={"page_url": page.url, "auto_play": True})
+                                else:
+                                    # 下一轮用最新截图先请求 VLM；VLM 仍无法定位时才进入 HUMAN
+                                    force_vlm_reason = "检测到视频，但可见播放控件无法通过浏览器输入启动"
+                                    continue
+                            # 等待播放结束：每 15 秒检测一次是否播完并截图进日志，进程保活
+                            result = browser.wait_for_video_end(
+                                poll_interval_ms=config.VIDEO_POLL_INTERVAL_MS,
+                                timeout_ms=config.VIDEO_WAIT_TIMEOUT_MS,
+                                logger=logger)
+                            if result == "timeout":
+                                flow.transition(FlowState.HUMAN, "视频播放等待超时")
+                                logger.log(step=page_count, action="need_human",
+                                           details={"page_url": page.url,
+                                                    "reason": "视频长时间未播完，请手动完成本页"})
+                                print("[需人工介入] 视频长时间未播完，请手动处理本页。")
+                                _manual_wait(browser, page.url)
+                            else:
+                                flow.transition(FlowState.OBSERVE,
+                                                f"视频处理结束（{result}），重新观察")
+                                logger.log(step=page_count, action="video_ended",
+                                           details={"page_url": page.url, "result": result})
+                                browser.wait(2000)
                             continue
                     logger.log(step=page_count, action="wait",
                                details={"page_url": page.url, "reason": reason})

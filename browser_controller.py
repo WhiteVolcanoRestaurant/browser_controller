@@ -482,56 +482,116 @@ class BrowserController:
         return (int(best["x"]), int(best["y"])), best
 
     def detect_video(self):
-        # 跨 iframe 检测 <video> 元素状态，返回 {has_video, paused, playing}。
-        # 用于识别"视频播放器页"（OCR 识别不到播放按钮/播放中无文字按钮）。
+        """检测当前页面（含 iframe）是否有一个"真正的课程视频播放器"。
+
+        背景：视频页的播放按钮是图形图标，OCR 识别不到；播放中画面又没有可点文字，
+        所以不能靠 OCR，只能读 <video> 元素的 paused/ended 状态来判断"视频页"。
+
+        判定目标：只认「可见 + 有真实内容」的 video，过滤三类干扰：
+          1. 隐藏/占位视频（display:none、opacity:0、1px 探针）；
+          2. 完全在视口外的视频（轮播里预加载的下一屏）；
+          3. 空壳 <video>（无 src、连元数据都没加载）。
+
+        返回字段：has_video / paused / ended / playing / duration / currentTime / readyState。
+        playing = !paused && !ended（真正在播）；ended 用于 wait_for_video_end 判断"播完"。
+
+        逐行判断理由（与下方 JS 顺序一一对应，调整精度时看这里，改动要有迹可循）：
+        1. 无 <video> 元素 → 直接无视频（最常见、最快的路径）。
+        2. 宽高 < 2px → 未渲染/1px 探针占位。课程主播放器占满卡片几百 px，1px 探针是
+           预加载用的不可见元素；取 <2 而非 <=0，是把 1px 探针一并排除，同时容忍亚像素
+           CSS 缩放误差。
+        3. display:none / visibility:hidden / opacity<=0.05 → 三类 CSS 隐藏。隐藏视频常用
+           opacity:0 而非 display:none（为保持加载）；0.05 与 _find_by_class /
+           find_text_element_center 的可见性判断保持一致（同一个"肉眼不可见"口径）。
+        4. 完全在视口外 → 只判断"完全在屏幕外"，不要求"完整在屏幕内"，因为主播放器可能
+           被布局截断一小部分但仍可见可播放；完全越界的是轮播预加载的下一屏或 CSS 移出
+           屏幕的隐藏视频。
+        5. 无源且无元数据 → 空壳 <video>。currentSrc 是浏览器实际解析出的源（含 blob:，
+           JS 动态赋值后才有值），src 是标签属性，任一非空都说明不是空壳；hasMeta 要求
+           duration 有效(>0 且有限，排除直播流 Infinity 与未加载的 NaN)或 readyState>=1
+           (HAVE_METADATA，说明已加载出时长/尺寸；不用更严的 >=2，避免 paused 未预加载
+           停在 1 时漏检)。
+        6. 命中第一个"可见且真实"的 video 即返回，避免被页面里多个预加载 video 干扰。
+        7. 有 <video> 但不满足条件 → 返回 hidden 数量，方便复盘是否过滤过严漏检。
+        """
         js = """() => {
           const vids = Array.from(document.querySelectorAll('video'));
-          if (vids.length === 0) return {has_video: false, paused: null, playing: null};
-          const v = vids[0];
-          return {has_video: true, paused: v.paused, playing: !v.paused && !v.ended};
+          if (vids.length === 0) return {has_video: false};
+          for (const v of vids) {
+            const r = v.getBoundingClientRect();
+            if (!r || r.width < 2 || r.height < 2) continue;
+            const s = getComputedStyle(v);
+            if (s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity) <= 0.05) continue;
+            if (r.top < 0 || r.left < 0 || r.top >= window.innerHeight || r.left >= window.innerWidth) continue;
+            const src = v.currentSrc || v.src || '';
+            const hasMeta = (v.duration && isFinite(v.duration) && v.duration > 0) || v.readyState >= 1;
+            if (!src && !hasMeta) continue;
+            return {
+              has_video: true,
+              paused: v.paused,
+              ended: v.ended,
+              playing: !v.paused && !v.ended,
+              duration: (v.duration && isFinite(v.duration)) ? v.duration : null,
+              currentTime: v.currentTime,
+              readyState: v.readyState,
+            };
+          }
+          return {has_video: false, hidden: vids.length};
         }"""
+        # 先查主文档：绝大多数非 iframe 场景一次命中，省去遍历 frame 的开销。
         try:
             r = self.page.evaluate(js)
             if r and r.get("has_video"):
                 return r
         except Exception:
             pass
+        # 主文档查不到，再逐个 iframe 查——课程内容通常嵌在 iframe 里（见 DEVELOPMENT_LOG 坑6）。
         try:
             frames = self.page.frames
         except Exception:
             frames = []
         for frame in frames:
             if frame == self.page.main_frame:
-                continue
+                continue  # 主 frame 上面已查过，跳过避免重复
             try:
                 r = frame.evaluate(js)
             except Exception:
                 continue
             if r and r.get("has_video"):
                 return r
-        return {"has_video": False, "paused": None, "playing": None}
+        # 兜底：主文档和所有 iframe 都没有"可见真实"的视频。
+        return {"has_video": False, "paused": None, "ended": None, "playing": None}
 
     def try_play_video(self):
         # 只观察可见播放控件的位置，再通过浏览器输入层点击；不调用 video.play()/element.click()。
+        # 收集所有可见播放控件候选（跨 iframe），逐个点击试错，直到 detect_video 报告 playing。
         js = """() => {
-          const btns = document.querySelectorAll(
-            '[class*="play"], [class*="Play"], .vjs-big-play-button, [class*="btn-play"]');
-          for (const b of btns) {
-            const r = b.getBoundingClientRect();
-            const s = getComputedStyle(b);
-            if (r.width > 0 && r.height > 0 && s.display !== 'none' &&
-                s.visibility !== 'hidden' && Number(s.opacity) > 0.05 &&
-                s.pointerEvents !== 'none') {
-              return {found: true, x: r.left + r.width / 2, y: r.top + r.height / 2};
-            }
+          const out = [];
+          const sels = [
+            '[class*="play"]', '[class*="Play"]', '.vjs-big-play-button',
+            '[class*="btn-play"]', '[class*="play-btn"]', 'video'
+          ];
+          const seen = new Set();
+          for (const sel of sels) {
+            document.querySelectorAll(sel).forEach(b => {
+              const r = b.getBoundingClientRect();
+              if (r.width <= 0 || r.height <= 0) return;
+              const s = getComputedStyle(b);
+              if (s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity) <= 0.05) return;
+              if (s.pointerEvents === 'none') return;
+              const cx = Math.round(r.left + r.width / 2);
+              const cy = Math.round(r.top + r.height / 2);
+              const key = cx + ',' + cy;
+              if (seen.has(key)) return;
+              seen.add(key);
+              out.push({x: cx, y: cy});
+            });
           }
-          return {found: false};
+          return out;
         }"""
         candidates = []
         try:
-            r = self.page.evaluate(js)
-            if r and r.get("found"):
-                candidates.append((r["x"], r["y"]))
+            candidates.extend(self.page.evaluate(js) or [])
         except Exception:
             pass
         try:
@@ -542,24 +602,38 @@ class BrowserController:
             if frame == self.page.main_frame:
                 continue
             try:
-                r = frame.evaluate(js)
+                inner = frame.evaluate(js) or []
             except Exception:
                 continue
-            if r and r.get("found"):
-                try:
-                    box = frame.frame_element().bounding_box() or {}
-                except Exception:
-                    box = {}
-                candidates.append((r["x"] + box.get("x", 0),
-                                   r["y"] + box.get("y", 0)))
-        if not candidates:
-            return {"found": False, "playing": False}
-        x, y = candidates[0]
-        if not self.click(x, y):
-            return {"found": True, "playing": False}
-        self.wait(600)
-        state = self.detect_video()
-        return {"found": True, "playing": bool(state.get("playing"))}
+            try:
+                box = frame.frame_element().bounding_box() or {}
+            except Exception:
+                box = {}
+            for c in inner:
+                candidates.append({"x": c["x"] + box.get("x", 0),
+                                   "y": c["y"] + box.get("y", 0)})
+        # 去重：同一坐标只保留一次
+        dedup = []
+        seen = set()
+        for c in candidates:
+            key = (int(c["x"]), int(c["y"]))
+            if key in seen:
+                continue
+            seen.add(key)
+            dedup.append(c)
+        if not dedup:
+            return {"found": False, "playing": False, "tried": 0}
+        # 逐个点击试错；每次点击后轮询最多约 3 秒判断是否真正开始播放
+        for c in dedup:
+            if not self.click(c["x"], c["y"]):
+                continue
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                self.wait(400)
+                state = self.detect_video()
+                if state.get("playing"):
+                    return {"found": True, "playing": True, "tried": len(dedup)}
+        return {"found": True, "playing": False, "tried": len(dedup)}
 
     def _matches_progress_api(self, url, post_data=""):
         # 用本地配置的 API 特征（config.PROGRESS_API_MARKS）判断请求是否属于"推进信号"。
@@ -643,15 +717,60 @@ class BrowserController:
             except Exception:
                 pass
 
-    def wait_for_video_playing(self, timeout_ms=120000):
-        # 轮询检测视频是否开始播放（用户手动点了播放按钮）
+    def wait_for_video_end(self, poll_interval_ms=15000, timeout_ms=None, logger=None):
+        # 轮询等待视频"播放结束"。每 poll_interval_ms 检测一次 <video> 状态并截图进日志，
+        # 直到：视频 ended / 视频元素消失 / 出现可点翻页按钮（播完自动出"下一页"）。
+        # 整体循环即"进程保活"：视频播放期间脚本停留在此持续检测，不退出、不重复点播放。
+        # 返回结果字符串：video_ended / video_gone / next_available / timeout。
+        timeout_ms = timeout_ms or config.VIDEO_WAIT_TIMEOUT_MS
         deadline = time.time() + timeout_ms / 1000.0
+        gone_streak = 0  # 连续"检测不到视频"次数，避免瞬时 evaluate 抖动误判"视频已消失"
         while time.time() < deadline:
-            v = self.detect_video()
-            if v.get("playing"):
-                return True
-            self.page.wait_for_timeout(2000)
-        return False
+            state = {"has_video": False, "ended": False, "playing": False}
+            try:
+                state = self.detect_video()
+            except Exception as e:
+                print(f"[视频] 检测状态异常（忽略，继续保活等待）: {e}")
+
+            # 每次轮询截图进日志，便于复盘视频页到底处于什么状态
+            shot_path = None
+            try:
+                self.screenshot()
+                shot_path = self.last_screenshot_path
+            except Exception as e:
+                print(f"[视频] 截图失败（忽略，继续等待）: {e}")
+
+            if logger is not None:
+                logger.log(getattr(self, "step", 0), "video_polling", {
+                    "page_url": self.get_current_url(),
+                    "has_video": state.get("has_video"),
+                    "playing": state.get("playing"),
+                    "ended": state.get("ended"),
+                    "current_time": state.get("currentTime"),
+                    "duration": state.get("duration"),
+                    "screenshot": shot_path,
+                })
+
+            # 播完判定优先级：结束 / 视频消失（连续两次）/ 出现翻页按钮
+            if state.get("ended"):
+                print("[视频] 检测到播放已结束，继续推进课程。")
+                return "video_ended"
+            if state.get("has_video"):
+                gone_streak = 0
+            else:
+                gone_streak += 1
+                if gone_streak >= 2:
+                    print("[视频] 视频元素已消失（可能页面已翻页/跳转），回到观察。")
+                    return "video_gone"
+            try:
+                if self.find_next_button():
+                    print("[视频] 出现可点翻页按钮，视为视频页已可推进。")
+                    return "next_available"
+            except Exception:
+                pass
+
+            self.page.wait_for_timeout(poll_interval_ms)
+        return "timeout"
 
     def get_current_url(self):
         return self.page.url

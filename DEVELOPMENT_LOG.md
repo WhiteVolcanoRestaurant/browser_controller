@@ -78,12 +78,30 @@
   2. `filter_by_keywords` 加「否定形式排除」：若 text 含 "不"+关键词（如"不确定"），跳过。
 
 ### 9、视频播放器页（OCR 识别不到播放按钮）
-- **现象**：课程里嵌视频，默认不自动播放，需要点播放按钮；播放按钮是图形图标 OCR 识别不到；播放中画面无文字按钮，一直"未匹配到任何目标"。
-- **根因**：播放按钮是图标（非文字），OCR 只认文字；播放中视频画面是动态帧，没有可点文字。
-- **解法**（[browser_controller.py](file:///c:/prog_file/code_with_vsc/browser_controller/browser_controller.py)）：
-  1. `detect_video()` 跨 iframe 检测 `<video>` 的 paused/playing 状态。
-  2. `try_play_video()` 只读取可见播放按钮边界，再通过浏览器输入层点击；不调用 `video.play()`。
-  3. main.py 在「wait 未匹配」时检测视频：playing 则等待；paused 则先自动播放、失败再提醒用户手动点播放，播放完出现"下一页"后自动继续。
+- **现象**：课程里嵌视频，默认不自动播放，需要点播放按钮；播放按钮是图形图标 OCR 识别不到；播放中画面无文字按钮，一直"未匹配到任何目标"。后续测试又暴露三个新问题：① 检测到视频却没正确等待播完；② 没正确开始播放；③ 把动态页里的隐藏 `<video>` 误判成视频播放器。
+- **根因**：
+  1. 播放按钮是图标（非文字），OCR 只认文字；播放中视频画面是动态帧，没有可点文字。
+  2. 旧 `detect_video()` 只要页面存在任意 `<video>` 元素就返回 has_video，不判断可见性/是否有真实内容，导致隐藏/占位/背景视频被误判。
+  3. 旧等待逻辑写死 `browser.wait(10000)`，没有"等到 ended"的实现；`wait_for_video_playing` 是死代码，且它等的是"开始播放"而非"播完"。
+  4. 旧 `try_play_video()` 只点第一个候选、点完只等 600ms，平台播放按钮 class 不匹配或加载慢就误判"没开始"。
+- **解法**（[browser_controller.py](file:///c:/prog_file/code_with_vsc/browser_controller/browser_controller.py) / [flow_state.py](file:///c:/prog_file/code_with_vsc/browser_controller/flow_state.py) / [main.py](file:///c:/prog_file/code_with_vsc/browser_controller/main.py) / [config.py](file:///c:/prog_file/code_with_vsc/browser_controller/config.py)）：
+  1. `detect_video()` 只认「可见 + 有真实内容」的 video，并新增返回 ended/duration/currentTime/readyState（过滤规则详见下方 9.1）。
+  2. `try_play_video()` 收集全部可见播放控件候选（含 `video` 本体），逐个点击试错，每次点击后轮询最多 3 秒确认 playing。
+  3. 新增 `wait_for_video_end()`：每 `VIDEO_POLL_INTERVAL_MS`(15s) 检测一次是否播完并截图写 `video_polling` 日志，整体循环即进程保活；`VIDEO_WAIT_TIMEOUT_MS`(20min) 超时转人工。
+  4. 状态机新增 `VIDEO` 状态：`WAIT → VIDEO → OBSERVE/HUMAN`，明确"视频播放/等待播完"阶段。
+  5. main.py 的 wait 分支改为进入 `VIDEO` 状态并调用 `wait_for_video_end`，删掉写死的 `wait(10000)`。
+
+### 9.1、detect_video 判断规则与数字常量（后续调精度有迹可循）
+`detect_video()` 的判定目标：只认「可见 + 有真实内容」的 `<video>`，过滤三类干扰——隐藏/占位视频、完全在视口外的视频、空壳 `<video>`（无 src、连元数据都没加载）。命中第一个"可见且真实"的 video 即返回（含 iframe 内）。各阈值含义：
+
+1. **宽高 < 2px 过滤**：课程主播放器通常占满卡片宽度（几百 px），而"1px 探针/占位 video"是预加载用的不可见元素。取 `< 2` 而非 `<= 0`，是把 1px 探针一并排除，同时容忍亚像素级 CSS 缩放误差。
+2. **opacity <= 0.05 过滤**：隐藏视频常用 `opacity:0` 而非 `display:none`（为了保持加载），也有接近 0 的淡入淡出帧。0.05 与项目里 `_find_by_class` / `find_text_element_center` 的可见性判断保持一致（同一个"肉眼不可见"口径）。
+3. **视口外过滤**：`r.top<0 || r.left<0 || r.top>=innerHeight || r.left>=innerWidth` 只判断"完全在屏幕外"，不要求"完整在屏幕内"，因为主播放器可能有一小部分被布局截断但仍可见可播放；完全越界的是轮播预加载的下一屏或 CSS 移出屏幕的隐藏视频。
+4. **readyState >= 1（HAVE_METADATA）**：`readyState 0 = HAVE_NOTHING`（连元数据都没有，是空壳占位）；`>=1` 说明已加载出时长/尺寸，可证明是真实有内容的视频。不用更严的 `>=2`（HAVE_CURRENT_DATA），因为 paused 且未预加载时可能停在 1，过严会漏检。
+5. **isFinite(duration) && duration > 0**：直播流 duration 为 Infinity、未加载元数据时 duration 为 NaN，两者都不算"有真实时长"，要排除。
+6. **有源（currentSrc || src）**：currentSrc 是浏览器实际解析出的源（含 blob:，JS 动态赋值后才有值），src 是标签属性，任一非空都说明不是空壳。
+
+> 调精度时优先看这些阈值：若真实课程视频被漏检，先怀疑 `readyState>=1` 或 `宽高<2` 过严；若仍误判"有视频"，先怀疑是否还有别的可见 `<video>`（如背景视频）没被 content 判断拦住。
 
 ### 10、Page 没有 wait_for_request 方法（API 监听完全失效）
 - **现象**：点了"下一页"脚本毫无反应，`wait_for_progress` 永远超时。
