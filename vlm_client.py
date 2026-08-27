@@ -67,7 +67,15 @@ class VLMClient:
             return {"action": "error", "reason": "JSON解析失败"}
         if "action" not in data or "confidence" not in data:
             return {"action": "error", "reason": "缺少必需字段"}
-        # VLM 不再输出坐标：click 时校验 target_text 非空，坐标由 OCR 反查
-        if data["action"] == "click" and not (data.get("target_text") or "").strip():
-            return {"action": "error", "reason": "click缺少target_text"}
+        # VLM 不再输出坐标：click 时校验目标文字非空，坐标由 OCR 反查。
+        # 兼容两种输出：targets（候选队列，推荐）与旧字段 target_text（单个）。
+        if data["action"] == "click":
+            targets = data.get("targets") or []
+            single = (data.get("target_text") or "").strip()
+            if not targets and single:
+                targets = [single]
+            targets = [str(t).strip() for t in targets if str(t).strip()]
+            if not targets:
+                return {"action": "error", "reason": "click缺少目标文字(targets)"}
+            data["targets"] = targets
         return data

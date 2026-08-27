@@ -94,6 +94,13 @@ def _vlm_before_human(flow, decision, screenshot, ocr_results, page_url, reason)
             "source": "vlm"}
 
 
+def _print_enter_hint():
+    # 需人工介入提示的通用补充：说明按 Enter 可立即唤醒脚本重新识别（无需等超时）。
+    # 对应的等待逻辑在 browser.wait_for_progress 里监听 Enter（返回 user_enter）。
+    print("手动完成后按 Enter 可立即唤醒脚本重新识别当前页面（无需等待超时），")
+    print("或等待脚本自动检测到页面变化后继续（Ctrl+C 退出）。")
+
+
 def main(course_url, enable_vlm=True):
     # 1. 初始化所有模块
     browser = BrowserController(channel=config.BROWSER_CHANNEL, headless=False)
@@ -129,8 +136,13 @@ def main(course_url, enable_vlm=True):
     prev_url = ""          # 上一轮页面 URL，用于检测平台自动跳转
     consecutive_wait_count = 0  # 连续"未匹配目标(决策 wait)"的次数，达到阈值触发 VLM 语义兜底
     failed_candidates = set()
+    pending_vlm = None  # 缓存 VLM 候选队列，跨轮逐个试错，避免同一页反复调用 VLM
     force_vlm_reason = ""
     paused = False  # 按 p 键切换：暂停/继续自动操作
+    print("=" * 60)
+    print("[提示] 运行中随时按 'p' 键（再稍等片刻，脚本检测到按键后）即可暂停运行；")
+    print("       暂停后再次按 'p' 键继续；Ctrl+C 随时退出。")
+    print("=" * 60)
     try:
         # 2. 打开课程页面
         page = browser.navigate(course_url)
@@ -167,6 +179,7 @@ def main(course_url, enable_vlm=True):
                     # 页面跳转说明有进展，重置无进展计数，避免跳转瞬间被误判为死循环
                     no_progress_count = 0
                     failed_candidates.clear()
+                    pending_vlm = None
                     # 页面已变动，重置"未匹配"计数，避免上一页的累计次数触发 VLM
                     consecutive_wait_count = 0
                     # 往回跳：从详情页跳回列表页，判定本课完成
@@ -215,24 +228,33 @@ def main(course_url, enable_vlm=True):
                 })
 
                 # 3.3 决策
-                flow.transition(FlowState.DECIDE, "根据截图、OCR和DOM生成候选")
-                # 当前活动页中已真正可见、未遮挡、未禁用的 btn-next 优先级最高。
-                # 隐藏的预置按钮不会通过 find_next_button 的可操作性检查。
-                dom_next = browser.find_next_button()
-                if dom_next:
-                    force_vlm_reason = ""
-                    (dx, dy), meta = dom_next
-                    decision_result = {
-                        "action": "click", "x": dx, "y": dy,
-                        "target": meta.get("cls", "btn-next"),
-                        "confidence": 0.98,
-                        "reason": "活动页存在可见且可操作的翻页元素",
-                        "source": "dom_next",
-                    }
+                flow.transition(FlowState.DECIDE, "根据 OCR 与 DOM 生成候选")
+                # 复用上一轮 VLM 候选队列：还有未尝试的候选时，跳过 DOM/OCR/VLM 重新决策，
+                # 直接沿用缓存队列，避免同一页反复调用 VLM（候选逐个试错）。
+                if (pending_vlm
+                        and any(_candidate_key(c) not in failed_candidates
+                                for c in pending_vlm.get("candidates", []))):
+                    decision_result = pending_vlm
                 else:
-                    decision_result = decision.decide(screenshot, ocr_results, page.url)
+                    pending_vlm = None
+                    # 当前活动页中已真正可见、未遮挡、未禁用的 btn-next 优先级最高。
+                    # 隐藏的预置按钮不会通过 find_next_button 的可操作性检查。
+                    dom_next = browser.find_next_button()
+                    if dom_next:
+                        force_vlm_reason = ""
+                        (dx, dy), meta = dom_next
+                        decision_result = {
+                            "action": "click", "x": dx, "y": dy,
+                            "target": meta.get("cls", "btn-next"),
+                            "confidence": 0.98,
+                            "reason": "活动页存在可见且可操作的翻页元素",
+                            "source": "dom",
+                        }
+                    else:
+                        decision_result = decision.decide(screenshot, ocr_results, page.url)
                 if (decision_result.get("source") == "vlm"
-                        and flow.state == FlowState.DECIDE):
+                        and flow.state == FlowState.DECIDE
+                        and decision_result is not pending_vlm):
                     # 题目推理发生在 DecisionEngine 内部，返回后补记显式状态。
                     flow.transition(FlowState.VLM_REASONING, "决策引擎已完成VLM推理")
 
@@ -266,7 +288,7 @@ def main(course_url, enable_vlm=True):
                             "target": meta.get("text", meta.get("cls", meta.get("hit", "DOM定位"))),
                             "confidence": 0.95,
                             "reason": f"OCR为空/等待触发兜底，DOM定位到{meta.get('hit', meta.get('tag', '元素'))}",
-                            "source": "dom_fallback",
+                            "source": "dom",
                         }
 
                 # 3.3.2 语义兜底：连续 wait 未匹配、DOM 兜底也找不到、且无视频时，
@@ -315,6 +337,12 @@ def main(course_url, enable_vlm=True):
                     else:
                         decision_result = reasoned
 
+                # 缓存 VLM 候选队列：供"候选逐个试错"跨轮复用，避免同一页重复调用 VLM。
+                if (decision_result.get("source") == "vlm"
+                        and decision_result.get("action") == "click"
+                        and decision_result.get("candidates")):
+                    pending_vlm = decision_result
+
                 # 3.4 通用安全校验（URL 白名单 S1）
                 viewport = browser.get_viewport_size()
                 ok, reason = sandbox.check_all(page)
@@ -334,11 +362,12 @@ def main(course_url, enable_vlm=True):
                             "confidence": decision_result.get("confidence", 0),
                         }]
 
-                    # 输出本次点击的全部候选内容（调试/分析用）：
-                    # 候选 = 关键词过滤命中的 OCR 文字（最多 3 个）。
-                    # 未命中任何关键词的按钮（如"点击翻转"）不会出现在这里，
-                    # 此时应检查 config.TARGET_BUTTONS 是否覆盖了该按钮关键词。
-                    print(f"[候选] 本次点击候选 {len(candidates)} 个:")
+                    # 输出本次点击的全部候选内容（调试/分析用）。
+                    # 候选来源有三种：OCR 关键词候选池（source=ocr）、DOM 可见翻页元素（source=dom）、
+                    # VLM 语义推理候选队列（source=vlm）。未命中任何关键词的按钮（如"点击翻转"）
+                    # 不会出现在 OCR 候选里，此时应检查 config.TARGET_BUTTONS 是否覆盖该按钮关键词。
+                    print(f"[候选] 本次点击候选 {len(candidates)} 个 "
+                          f"（来源: {decision_result.get('source', 'ocr')}）:")
                     for _i, _c in enumerate(candidates, 1):
                         print(f"       {_i}. \"{_c.get('target')}\" @ "
                               f"({_c.get('x')},{_c.get('y')}) "
@@ -355,6 +384,7 @@ def main(course_url, enable_vlm=True):
                                        details={"page_url": page.url,
                                                 "reason": human_reason})
                             print(f"[需人工介入] {human_reason}")
+                            _print_enter_hint()
                             _manual_wait(browser, page.url)
                             failed_candidates.clear()
                             no_progress_count = 0
@@ -387,7 +417,7 @@ def main(course_url, enable_vlm=True):
                         "target": cand.get("target", "unknown"),
                         "x": x, "y": y,
                         "confidence": cand.get("confidence", 0),
-                        "source": decision_result.get("source", "ocr_or_vlm"),
+                        "source": decision_result.get("source", "ocr"),
                         "result": why,
                         "candidates": [{
                             "target": _c.get("target"),
@@ -401,6 +431,7 @@ def main(course_url, enable_vlm=True):
                         no_progress_count = 0
                         consecutive_wait_count = 0
                         failed_candidates.clear()
+                        pending_vlm = None
                         browser.wait(int(random.uniform(
                             config.MIN_DELAY_SEC, config.MAX_DELAY_SEC) * 1000))
                     else:
@@ -411,14 +442,21 @@ def main(course_url, enable_vlm=True):
                                             "target": cand.get("target", "unknown"),
                                             "no_progress_count": no_progress_count})
                         if decision_result.get("source") == "vlm":
-                            # VLM已经完成推理且目标验证失败，可以直接进入人工，不再循环调用VLM。
-                            human_reason = "VLM给出的目标点击后没有产生页面变化"
+                            # VLM 已给出候选队列：还有未尝试的候选就继续试下一个（复用 pending_vlm，
+                            # 不再调用 VLM）；全部候选都无效才转人工。
+                            if any(_candidate_key(c) not in failed_candidates
+                                   for c in candidates):
+                                browser.wait(random.randint(700, 1400))
+                                continue
+                            human_reason = "VLM给出的所有候选点击后均未产生页面变化"
                             flow.transition(FlowState.HUMAN, human_reason)
                             logger.log(step=page_count, action="need_human",
                                        details={"page_url": page.url,
                                                 "reason": human_reason})
-                            print("[需人工介入] VLM目标未产生页面变化，请手动完成本页。")
+                            print("[需人工介入] VLM候选均未产生页面变化，请手动完成本页。")
+                            _print_enter_hint()
                             _manual_wait(browser, page.url)
+                            pending_vlm = None
                             failed_candidates.clear()
                             no_progress_count = 0
                             continue
@@ -465,6 +503,7 @@ def main(course_url, enable_vlm=True):
                                            details={"page_url": page.url,
                                                     "reason": "视频长时间未播完，请手动完成本页"})
                                 print("[需人工介入] 视频长时间未播完，请手动处理本页。")
+                                _print_enter_hint()
                                 _manual_wait(browser, page.url)
                             else:
                                 flow.transition(FlowState.OBSERVE,
@@ -488,7 +527,7 @@ def main(course_url, enable_vlm=True):
                     print("\n" + "=" * 60)
                     print("[需人工介入] 检测到题目但系统无法确定答案。")
                     print(f"原因: {decision_result.get('reason', '未知')}")
-                    print("请在浏览器中手动完成此题，脚本检测到翻页后会自动继续（按 Ctrl+C 可退出）。")
+                    _print_enter_hint()
                     prev_need_url = page.url
                     changed, why = browser.wait_for_progress(timeout_ms=180000, prev_url=prev_need_url)
                     if changed and why == "user_enter":

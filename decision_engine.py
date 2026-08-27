@@ -21,23 +21,25 @@ VLM_COMMON_HEAD = """你是一个网页课程学习助手。请根据页面截�
 # 公共结尾：注意事项（两个 VLM 提示词共用）
 VLM_COMMON_TAIL = """
 注意：
-- target_text 必须逐字复制 OCR 文字，不要改写或增删，否则无法定位到点击坐标。
+- targets 里每个目标文字都必须逐字复制 OCR 文字，不要改写或增删，否则无法定位到点击坐标。
+- targets 按"最可能点中并推进"从高到低排序，脚本会按顺序逐个尝试。
 - 只返回 JSON，不要输出其它内容。"""
 
 # 题目页兜底规则：读题作答 + 常规翻页/结束判断
 VLM_QUESTION_RULES = """决策规则：
-- 优先点击推进课程进度的按钮（如"下一页""下一题""下一步""继续""确定"等），action 设为 "click"，target_text 填写该按钮文字。
-- 如果页面包含题目或问答，且你能确定正确答案，则 action 设为 "click"，target_text 填写正确选项对应的文字；多选题一次只填一个尚未选中的正确选项，等所有正确选项都选完后，再让 target_text 填"提交"。
-- 如果页面包含题目或问答，但你无法确定答案、或题目是开放题/涉及安全判断拿不准时，action 设为 "need_human"，target_text 填空字符串 ""，reason 说明需要人工介入的原因。
-- 如果页面显示"已完成""学习完成""课程完成"等结束提示，action 设为 "terminate"，target_text 填空字符串 ""。
-- 如果暂时无法确定且不是题目，action 设为 "wait"，target_text 填空字符串 ""。"""
+- 优先点击推进课程进度的按钮（如"下一页""下一题""下一步""继续""确定"等），action 设为 "click"，targets 填写候选按钮文字（按优先级从高到低，可给多个备选，脚本会逐个尝试）。
+- 如果页面包含题目或问答，且你能确定正确答案，则 action 设为 "click"，targets 填写正确选项对应的文字（可给一个，也可按把握程度给多个备选）。
+- 多选题：把所有尚未选中的正确选项都填入 targets（脚本会逐个点击这些选项，无需再为每个选项单独询问）；当所有正确选项都已选中、页面只剩"提交"时，targets 只填 ["提交"]。
+- 如果页面包含题目或问答，但你无法确定答案、或题目是开放题/涉及安全判断拿不准时，action 设为 "need_human"，targets 填空数组 []，reason 说明需要人工介入的原因。
+- 如果页面显示"已完成""学习完成""课程完成"等结束提示，action 设为 "terminate"，targets 填空数组 []。
+- 如果暂时无法确定且不是题目，action 设为 "wait"，targets 填空数组 []。"""
 
 # 语义兜底规则：OCR 匹配不到标准翻页按钮时，判断页面上有没有"推进按钮"
 VLM_NAV_RULES = """决策规则：
-- 当前页面没有识别出标准翻页按钮（如"下一页""继续""下一步"），请判断页面上是否存在一个"能推进课程进度"的可点击元素（按钮/链接/图片链接）。
+- 当前页面没有识别出标准翻页按钮（如"下一页""继续""下一步"），请判断页面上是否存在"能推进课程进度"的可点击元素（按钮/链接/图片链接）。
 - 这类元素通常是页面中靠下方、唯一明显的按钮或引导点击文字，例如"点击xx查看xxxx""看看有哪些xxxx"，这些文字一般能引导用户点击查看。
-- 如果存在这样的元素，action 设为 "click"，target_text 填写该元素文字。
-- 如果页面是纯内容展示、没有可点击的推进元素，action 设为 "need_human"，target_text 填空字符串 ""。reason 说明你对这一页内容讲了什么的理解和判断，哪一段文本是最"能推进课程进度"的。"""
+- 如果存在这样的元素，action 设为 "click"，targets 填写这些元素文字（按优先级从高到低，可给多个备选）。
+- 如果页面是纯内容展示、没有可点击的推进元素，action 设为 "need_human"，targets 填空数组 []。reason 说明你对这一页内容讲了什么的理解和判断，哪一段文本是最"能推进课程进度"的。"""
 
 
 VLM_PROMPT_TEMPLATE = (
@@ -45,7 +47,7 @@ VLM_PROMPT_TEMPLATE = (
     + """请严格按照以下 JSON 格式输出决策，不要输出任何其他内容：
 {{
   "action": "click" 或 "wait" 或 "terminate" 或 "need_human",
-  "target_text": "要点击的目标文字（必须原样复制自上方 OCR 文字）",
+  "targets": ["要点击的目标文字（必须原样复制自上方 OCR 文字，按优先级从高到低，可多个）"],
   "reason": "一句话说明理由",
   "confidence": 0.0 到 1.0 的数字
 }}
@@ -63,7 +65,7 @@ VLM_SEMANTIC_PROMPT = (
     + """请严格按照以下 JSON 格式输出决策，不要输出任何其他内容：
 {{
   "action": "click" 或 "need_human",
-  "target_text": "该可点击元素的文字（必须原样复制自上方 OCR 文字）",
+  "targets": ["该可点击元素的文字（必须原样复制自上方 OCR 文字，按优先级从高到低，可多个）"],
   "reason": "一句话说明为什么它是推进按钮",
   "confidence": 0.0 到 1.0 的数字
 }}
@@ -125,7 +127,8 @@ class DecisionEngine:
                         "x": pool[0]["x"], "y": pool[0]["y"],
                         "target": pool[0]["target"],
                         "confidence": pool[0]["confidence"],
-                        "candidates": pool}
+                        "candidates": pool,
+                        "source": "ocr"}
             # 最高命中的类别是 submit/guide_click：先做结束检测与题目检测（保持原有优先级）。
             # 结束标志只认正文"课程的学习已完成"等（按钮"返回列表"可能与其它页面内容冲突，
             # 不能用按钮文字判定；也不用裸"已完成"，阶段性文案"你已完成了本微课"会误判）。
@@ -143,7 +146,8 @@ class DecisionEngine:
                     "x": pool[0]["x"], "y": pool[0]["y"],
                     "target": pool[0]["target"],
                     "confidence": pool[0]["confidence"],
-                    "candidates": pool}
+                    "candidates": pool,
+                    "source": "ocr"}
 
         # 步骤 2：没有任何按钮候选时的结束检测。
         # 结束标志只认正文"课程的学习已完成"等（按钮"返回列表"可能与其它页面内容冲突，
@@ -180,7 +184,8 @@ class DecisionEngine:
                             "target": candidates[0]["target"],
                             "confidence": candidates[0]["confidence"],
                             "candidates": candidates,
-                            "source": "back_fallback"}
+                            "source": "ocr",
+                            "reason": "无 VLM 保底：底部返回按钮"}
 
         # 步骤 5：OCR 无结果时等待（可能是登录页或页面尚未渲染），不触发 VLM
         if not ocr_results:
@@ -297,22 +302,41 @@ class DecisionEngine:
         # wait / terminate / need_human 无需定位，直接返回
         if action != "click":
             return {"action": action,
-                    "target": decision.get("target_text", ""),
+                    "target": "",
                     "confidence": confidence,
                     "reason": decision.get("reason"),
                     "source": "vlm"}
 
-        # click：在 OCR 结果中反查 target_text，得到精确点击坐标
-        target_text = (decision.get("target_text") or "").strip()
-        if not target_text:
+        # click：在 OCR 结果中反查每个 target 得到精确坐标，构造候选队列。
+        # VLM 一次给出多个候选目标，main 循环会逐个 click_and_verify 试错，
+        # 避免第一个目标点不中时又要重新调用一次 VLM（降低 VLM 调用次数）。
+        targets = decision.get("targets") or []
+        if not targets:
+            single = (decision.get("target_text") or "").strip()
+            if single:
+                targets = [single]
+        if not targets:
             return {"action": "error", "reason": "VLM未给出目标文字"}
-        located = self.ocr_engine.locate_by_text(ocr_results, target_text)
-        if located is None:
-            print(f"[OCR] 反查失败: 未在 OCR 结果中找到 \"{target_text}\"")
+
+        candidates = []
+        seen = set()
+        for t in targets:
+            located = self.ocr_engine.locate_by_text(ocr_results, t)
+            if located is None:
+                print(f"[OCR] 反查失败: 未在 OCR 结果中找到 \"{t}\"")
+                continue
+            cx, cy = self.ocr_engine.get_center_point(located["bbox"])
+            if (cx, cy) in seen:
+                continue
+            seen.add((cx, cy))
+            candidates.append({"x": cx, "y": cy, "target": located["text"],
+                               "confidence": confidence})
+            print(f"[OCR] 反查成功: \"{t}\" -> 匹配 \"{located['text']}\" @ ({cx}, {cy})")
+        if not candidates:
             return {"action": "error",
-                    "reason": f"OCR未定位到目标文字: {target_text}"}
-        cx, cy = self.ocr_engine.get_center_point(located["bbox"])
-        print(f"[OCR] 反查成功: \"{target_text}\" -> 匹配 \"{located['text']}\" @ ({cx}, {cy})")
-        return {"action": "click", "x": cx, "y": cy,
-                "target": located["text"], "confidence": confidence,
-                "reason": decision.get("reason"), "source": "vlm"}
+                    "reason": f"OCR未定位到目标文字: {targets}"}
+        return {"action": "click",
+                "x": candidates[0]["x"], "y": candidates[0]["y"],
+                "target": candidates[0]["target"], "confidence": confidence,
+                "reason": decision.get("reason"), "source": "vlm",
+                "candidates": candidates}
