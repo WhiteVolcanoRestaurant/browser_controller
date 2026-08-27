@@ -63,16 +63,19 @@ navigate
       └─ 无效 → 试下一候选 → VLM 语义推理 → 人工
 ```
 
-**决策优先级**（[decision\_engine.py](decision_engine.py)）：
+**决策优先级**（[main.py](main.py) 主循环，DOM 最优先；其后才是 [decision\_engine.py](decision_engine.py) 的 `decide()`）：
 
-1. **结束页固定正文**：命中 `COURSE_FINISHED_TEXT`（"课程的学习已完成"）→ `terminate`
-2. **按钮候选池**：合并 `start/next/submit/guide_click`（类别优先、同类从下到上）
-   - 最高类别是 `start/next` → 直接点击（跳过结束/题目检测，保持"下一页优先于结束/题目"语义）
+1. **DOM 翻页按钮（最高优先级）**：`find_next_button()` 命中「活动页内 + 可见 + 未遮挡 + 未禁用」的 `btn-next` → 直接点击，**跳过后面所有 OCR/VLM 决策**（class 恒定比 OCR 文字更可靠）。
+2. **结束页固定正文**：命中 `COURSE_FINISHED_TEXT`（"课程的学习已完成"）→ `terminate`
+3. **按钮候选池（OCR）**：合并 `start/next/submit/guide_click`（类别优先、同类从下到上）
+   - 最高类别是 `start/next` → 直接点击（跳过结束/题目检测）
    - 最高类别是 `submit/guide_click` → 先做结束/题目检测（题目页"提交"先走 VLM 读题）
-3. **结束检测**：命中 `END_TEXTS`（"课程的学习已完成/学习完成/课程完成/结束"）→ `terminate`
-4. **题目检测**：命中 `QUESTION_KEYWORDS` → VLM 读题作答
-5. **返回保底**：无 VLM 时底部"返回"（视口下半部分）可点 → `click`
-6. **兜底**：无结果 → `wait`
+4. **结束检测**：命中 `END_TEXTS`（"课程的学习已完成/学习完成/课程完成/结束"）→ `terminate`
+5. **题目检测**：命中 `QUESTION_KEYWORDS` → VLM 读题作答
+6. **返回保底**：无 VLM 时底部"返回"（视口下半部分）可点 → `click`
+7. **兜底**：无结果 → `wait`（OCR 空 / wait / error 时再走 DOM 兜底，见下方数据流）
+
+`find_next_button` 的具体校验逻辑与边界见 [PRD.md](PRD.md) 模块 1。
 
 ***
 

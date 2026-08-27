@@ -47,6 +47,14 @@
 
 5、**升级路径统一走 VLM 再人工**：任何"视觉候选全部无效 / need_human"的情况，只要 VLM 可用，都先进入 `VLM_REASONING` 做一次语义推理，仍无法处理才转 `HUMAN`（`_vlm_before_human`）。
 
+6、**DOM btn-next 是最高优先级的快路径**（[main.py](file:///c:/prog_file/code_with_vsc/browser_controller/main.py) 决策 3.3 / [browser_controller.py](file:///c:/prog_file/code_with_vsc/browser_controller/browser_controller.py) `find_next_button`）：主循环先查 `find_next_button()`，命中就直接点、**跳过后面 OCR/VLM 决策**（class 恒定 next-btn/next/btn-next 比 OCR 文字更可靠）。它按以下顺序逐项校验后才返回（最多收集 5 个、取最靠下一个，返回单个候选而非队列）：
+   1. class 命中 next-btn/next/btn-next；
+   2. 活动页内：页面存在 `.page-active`/`.page.active` 时，元素必须是其本身或子孙；
+   3. 可见：宽高>0、不完全在视口外、非 `display:none`/`visibility:hidden`/`opacity<=0.05`；
+   4. 可交互：非 `pointer-events:none`、非 `disabled`、非 `aria-disabled="true"`；
+   5. 未遮挡：中心点 `elementFromPoint` 反查命中元素本身或其祖先/子孙。
+- 边界：①「活动页内」依赖 `.page-active/.page.active` 约定，页面不用这两个 class 则空操作；② `disabled` 只对表单元素（button/input/select）有效，`<img>`/`<a>` 只能靠 `aria-disabled`/`pointer-events`；③「未遮挡」是中心点命中测试，非整块遮挡检测。
+
 ## 三、踩过的坑（按时间顺序）
 
 ### 1、OCR 为空时误触发 VLM → 报错退出

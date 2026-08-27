@@ -124,8 +124,14 @@ class BrowserController:
         # DOM 兜底：在可见文本节点/元素中找关键词，返回中心坐标（过滤屏幕外隐藏元素，从下到上取最靠下）
 
     find_next_button():
-        # 按 NEXT_BUTTON_CLASS_HINTS 跨 iframe 定位翻页按钮，只认"活动页(.page-active/.page.active)内、
-        # 可见、未遮挡、未禁用"的元素；返回 (x, y) 主文档坐标
+        # DOM 翻页按钮快路径（决策最高优先级）。按 NEXT_BUTTON_CLASS_HINTS 跨 iframe 定位，
+        # 逐项校验后才返回 (x, y) 主文档坐标：
+        #   1. class 命中 next-btn/next/btn-next
+        #   2. 活动页内：页面若存在 .page-active/.page.active，元素必须是其本身或子孙
+        #   3. 可见：宽高>0、不完全在视口外、非 display:none/visibility:hidden/opacity<=0.05
+        #   4. 可交互：非 pointer-events:none、非 disabled、非 aria-disabled="true"
+        #   5. 未遮挡：中心点 elementFromPoint 反查命中的必须是元素本身或其祖先/子孙
+        # 收集最多 5 个候选，从下到上取最靠下一个返回（返回单个候选，非队列）。
 
     detect_video():
         # 跨 iframe 检测"可见 + 有真实内容"的 <video>（过滤隐藏/占位/视口外/空壳视频）
@@ -167,6 +173,12 @@ class BrowserController:
     close():
         # 关闭浏览器
 ```
+
+> **find_next_button 边界说明**：
+> - 「活动页内」依赖 `.page-active` / `.page.active` class 约定：页面若不用这两个 class，该层为空操作（放行全部）。
+> - 「未禁用」的 `disabled` 只对原生表单元素（button/input/select）有效；`<img>`/`<a>` 等无 `disabled`，只能靠 `aria-disabled` / `pointer-events:none` 兜。
+> - 「未遮挡」是中心点 `elementFromPoint` 命中测试，非整块区域的遮挡检测。
+> - 最终只返回最靠下的**一个**候选，不返回队列。
 
 ---
 
