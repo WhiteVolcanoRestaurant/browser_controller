@@ -16,6 +16,10 @@ os.environ["HOME"] = PROJECT_ROOT
 
 import config
 from action_logger import ActionLogger
+from alert import (
+    print_enter_hint,   # 需人工介入时打印 Enter 提示，并按配置触发声音/弹窗提醒
+    startup_alert_test,  # 启动时的一次性提醒自检（声音/弹窗）
+)
 from browser_controller import BrowserController
 from decision_engine import DecisionEngine
 from flow_state import FlowState, FlowStateMachine
@@ -94,13 +98,6 @@ def _vlm_before_human(flow, decision, screenshot, ocr_results, page_url, reason)
             "source": "vlm"}
 
 
-def _print_enter_hint():
-    # 需人工介入提示的通用补充：说明按 Enter 可立即唤醒脚本重新识别（无需等超时）。
-    # 对应的等待逻辑在 browser.wait_for_progress 里监听 Enter（返回 user_enter）。
-    print("手动完成后按 Enter 可立即唤醒脚本重新识别当前页面（无需等待超时），")
-    print("或等待脚本自动检测到页面变化后继续（Ctrl+C 退出）。")
-
-
 def main(course_url, enable_vlm=True):
     # 1. 初始化所有模块
     browser = BrowserController(channel=config.BROWSER_CHANNEL, headless=False)
@@ -143,6 +140,9 @@ def main(course_url, enable_vlm=True):
     print("[提示] 运行中随时按 'p' 键（再稍等片刻，脚本检测到按键后）即可暂停运行；")
     print("       暂停后再次按 'p' 键继续；Ctrl+C 随时退出。")
     print("=" * 60)
+    # 可选提醒自检：在真正进入主循环前先验证一次声音/弹窗是否有效，音量不合适可当场调整。
+    if config.HUMAN_ALERT_ENABLE and config.HUMAN_ALERT_STARTUP_CHECK:
+        startup_alert_test()
     try:
         # 2. 打开课程页面
         page = browser.navigate(course_url)
@@ -384,7 +384,7 @@ def main(course_url, enable_vlm=True):
                                        details={"page_url": page.url,
                                                 "reason": human_reason})
                             print(f"[需人工介入] {human_reason}")
-                            _print_enter_hint()
+                            print_enter_hint()
                             _manual_wait(browser, page.url)
                             failed_candidates.clear()
                             no_progress_count = 0
@@ -454,7 +454,7 @@ def main(course_url, enable_vlm=True):
                                        details={"page_url": page.url,
                                                 "reason": human_reason})
                             print("[需人工介入] VLM候选均未产生页面变化，请手动完成本页。")
-                            _print_enter_hint()
+                            print_enter_hint()
                             _manual_wait(browser, page.url)
                             pending_vlm = None
                             failed_candidates.clear()
@@ -503,7 +503,7 @@ def main(course_url, enable_vlm=True):
                                            details={"page_url": page.url,
                                                     "reason": "视频长时间未播完，请手动完成本页"})
                                 print("[需人工介入] 视频长时间未播完，请手动处理本页。")
-                                _print_enter_hint()
+                                print_enter_hint()
                                 _manual_wait(browser, page.url)
                             else:
                                 flow.transition(FlowState.OBSERVE,
@@ -527,7 +527,7 @@ def main(course_url, enable_vlm=True):
                     print("\n" + "=" * 60)
                     print("[需人工介入] 检测到题目但系统无法确定答案。")
                     print(f"原因: {decision_result.get('reason', '未知')}")
-                    _print_enter_hint()
+                    print_enter_hint()
                     prev_need_url = page.url
                     changed, why = browser.wait_for_progress(timeout_ms=180000, prev_url=prev_need_url)
                     if changed and why == "user_enter":

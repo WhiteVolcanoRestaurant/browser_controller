@@ -56,6 +56,24 @@ MAX_RELOAD_COUNT = 2
 # 适合不想跑本地大模型/显存不足的用户。
 ENABLE_VLM = True
 
+# ============================================================
+# 需要人工介入时的主动提醒（可选增强，默认关闭）。
+# 脚本打印"[需人工介入]"转入手动处理时，终端提示可能被用户遗漏，
+# 开启后可通过提示音和/或小弹窗主动引起注意，避免长时间干等。
+# ------------------------------------------------------------
+#   HUMAN_ALERT_ENABLE：总开关，设为 False 即完全关闭本功能
+#   HUMAN_ALERT_SOUND：播放提示音（Windows 用系统通知音效，柔和、异步不阻塞）
+#   HUMAN_ALERT_POPUP：弹出小提示窗；弹窗里可勾选"不再弹窗"，
+#                      勾选会把本值写回 config.py（持久化），恢复时改回 True
+# 弹窗在独立线程中弹出，不会阻塞主循环的人工等待/轮询。
+HUMAN_ALERT_ENABLE = True
+HUMAN_ALERT_SOUND = True
+HUMAN_ALERT_POPUP = True
+# 启动时是否做一次提示音/弹窗自检（需 HUMAN_ALERT_ENABLE=True 才生效）：
+# 进入主循环前播一次音、弹一次窗，通过一问一答确认能听到/看到；
+# 若音量不合适，会给出系统音量调节指引，并可当场重新试听。
+HUMAN_ALERT_STARTUP_CHECK = True
+
 # 紧急停止热键（说明用；实际由 Ctrl+C 触发的 KeyboardInterrupt 处理）
 ESC_KEY = "Escape"
 

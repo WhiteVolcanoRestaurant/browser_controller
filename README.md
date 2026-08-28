@@ -34,6 +34,7 @@
 | 文件                                                        | 职责                                                        |
 | --------------------------------------------------------- | --------------------------------------------------------- |
 | [main.py](main.py)                                        | 主入口：主循环、多候选试错升级、need\_human、视频处理、VLM 健康检查、暂停控制       |
+| [alert.py](alert.py)                                      | 人工介入提醒：声音/弹窗、启动自检、"不再弹窗"持久化（HUMAN\_ALERT\_\* 配置）      |
 | [flow\_state.py](flow_state.py)                           | 显式工作流状态：观察、决策、操作、验证、VLM、视频、人工与完成                        |
 | [config.py](config.py)                                    | 全局配置：按钮关键词、阈值、视口；平台域名/API 特征从本地 `config_platform.py` 桥接读取 |
 | [config\_platform.example.py](config_platform.example.py) | 平台配置模板（占位符）；真实平台信息只写本地 `config_platform.py`，不进仓库          |
@@ -190,6 +191,20 @@ python test_flow.py --no-vlm
 | [test\_flow.py](test_flow.py)                 | 本地测试页全流程测试：自动起服务器 → 跑通 test\_page.html → 关服务器 |
 | [test\_page.html](test_page.html)            | 本地测试页（11 段分级流程，配合 `python test_flow.py` 使用）                        |
 
+### 人工介入提醒（可选）
+
+默认陷入"需要人工介入"时只在终端打印提示（`[需人工介入]`）。若希望脚本主动用声音 / 弹窗引起注意，可在 [config.py](config.py) 开启：
+
+| 配置 | 默认 | 说明 |
+| ---- | ---- | ---- |
+| `HUMAN_ALERT_ENABLE` | `False` | 总开关，设为 `True` 后声音/弹窗提醒才生效 |
+| `HUMAN_ALERT_SOUND` | `True` | 播放提示音（Windows 用系统通知音效，柔和、异步不阻塞） |
+| `HUMAN_ALERT_POPUP` | `True` | 弹小提示窗提醒转人工介入 |
+| `HUMAN_ALERT_STARTUP_CHECK` | `True` | 启动时自检一次声音/弹窗，可当场确认并调整音量 |
+
+- **弹窗内置"不再弹窗"选项**：在提示窗里勾选后，脚本会把 `config.py` 的 `HUMAN_ALERT_POPUP` 写回为 `False`（持久化），此后再遇人工介入不再弹窗；恢复只需把该值改回 `True`。弹窗界面也会注明这一点，方便你到 config 里手动管理。
+- **音量调整**：提示音音量跟随系统"通知"音效，可在 `设置 → 系统 → 声音 → 音量混合器` 或"通知音量"里调整。
+
 ### 日志与截图
 
 - 操作日志：`logs/action_log.jsonl`（每步 JSON 行）
@@ -226,6 +241,7 @@ python test_flow.py --no-vlm
 ```
 browser_controller/
 ├── main.py                # 主入口：主循环、候选试错升级、need_human、视频处理、暂停控制
+├── alert.py               # 人工介入提醒：声音/弹窗、启动自检、"不再弹窗"持久化
 ├── flow_state.py          # 工作流状态机（观察/决策/操作/验证/VLM/视频/人工/完成）
 ├── config.py              # 全局配置常量（平台信息从 config_platform 桥接读取）
 ├── config_platform.example.py  # 平台配置模板（占位符，可提交）
