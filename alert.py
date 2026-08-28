@@ -24,7 +24,7 @@ def print_enter_hint():
     # 需人工介入提示的通用补充：说明按 Enter 可立即唤醒脚本重新识别（无需等超时）。
     # 对应的等待逻辑在 browser.wait_for_progress 里监听 Enter（返回 user_enter）。
     print("手动完成后按 Enter 可立即唤醒脚本重新识别当前页面（无需等待超时），")
-    print("或等待脚本自动检测到页面变化后继续（Ctrl+C 退出）。")
+    print("或等待脚本自动检测到页面较大幅度变化后继续（Ctrl+C 退出脚本并关闭浏览器）。")
     # 可选增强：终端提示可能被遗漏，按配置用提示音/弹窗主动引起注意。
     notify_human_intervention()
 
@@ -145,9 +145,10 @@ def _disable_popup_persist():
 
 def startup_alert_test():
     """启动时的一次性提醒自检：播一次音、弹一次窗，通过一问一答确认有效。
-    若没听到/没看到，输出音量与弹窗调整指引，并可当场重新试听。（自检可在 config.py 中关闭）"""
+    若没听到/没看到，输出音量与弹窗调整指引，并可当场重新试听。"""
     print("\n[提醒自检] 即将播放一次提示音、弹出一次提示窗，"
-          "用于确认'人工介入提醒'确实有效。在 cmd 窗口和在 VSC 终端中运行效果可能略有差别。")
+          "用于确认'人工介入提醒'确实有效。在 cmd 窗口和在 VSC 终端中运行效果可能略有差别。"
+          "（自检可在 config.py 中关闭）")
     if config.HUMAN_ALERT_SOUND:
         _play_alert_sound()
     if config.HUMAN_ALERT_POPUP:

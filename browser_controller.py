@@ -751,6 +751,17 @@ class BrowserController:
                     "screenshot": shot_path,
                 })
 
+            # 终端感知：把视频当前进度/总时长和每轮检测间隔打出来，
+            # 让用户直观看到"脚本在按视频时长等待播完"，而非干等。
+            if state.get("has_video"):
+                dur = state.get("duration")
+                cur = state.get("currentTime")
+                if isinstance(dur, (int, float)) and isinstance(cur, (int, float)):
+                    print(f"[视频] 轮询保活中：播放进度 {cur:.0f}s / 总时长 {dur:.0f}s"
+                          f"（每 {poll_interval_ms/1000:.0f}s 检测一次并截图进日志）")
+                else:
+                    print("[视频] 轮询保活中：时长信息未就绪，持续检测并截图进日志")
+
             # 播完判定优先级：结束 / 视频消失（连续两次）/ 出现翻页按钮
             if state.get("ended"):
                 print("[视频] 检测到播放已结束，继续推进课程。")

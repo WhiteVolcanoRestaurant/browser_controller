@@ -10,9 +10,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 单课程最大页数，防止死循环
 MAX_PAGES = 100
 
-# 两次操作之间的间隔（秒）
-MIN_DELAY_SEC = 3
-MAX_DELAY_SEC = 15
+# 两次操作之间的随机等待时间间隔（秒）
+MIN_DELAY_SEC = 2
+MAX_DELAY_SEC = 6
 
 # 视频播放等待：每轮检测"是否播完"的间隔（毫秒）。
 # 视频页 OCR 识别不到播放按钮，播放中画面也无文字，只能靠轮询 <video> 的 ended 状态推进。
@@ -76,6 +76,10 @@ HUMAN_ALERT_STARTUP_CHECK = True
 
 # 紧急停止热键（说明用；实际由 Ctrl+C 触发的 KeyboardInterrupt 处理）
 ESC_KEY = "Escape"
+
+# 下一节等待：检测到"打开的是已学过的同一门课"时，倒计时秒数。
+# 倒计时内按 Enter 立即确认继续；超时则默认继续，避免无人按 Enter 时永久卡住。
+WAIT_CONFIRM_SECONDS = 10
 
 # ============================================================
 # 平台私有配置（域名 / 具体 API 特征），从本地 config_platform.py 读取。

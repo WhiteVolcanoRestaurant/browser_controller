@@ -6,6 +6,7 @@ import argparse
 import os
 import random
 import sys
+import time
 
 # 【强制规则】重定向 PaddleOCR 模型缓存目录到当前纯英文项目路径，
 # 避免 Windows 中文用户名目录导致 PaddleOCR 底层 C++ 引擎加载模型失败。
@@ -50,16 +51,44 @@ def _is_course_finished_jump(prev_url, curr_url):
     return left_detail or reached_finish
 
 
+def _confirm_within_seconds(browser, timeout=10):
+    # 短倒计时确认窗口：timeout 秒内按 Enter 立即返回 True；超时返回 False（默认继续）。
+    # read_key 是非阻塞读，用户按下的 Enter 会缓存在缓冲区，倒计时内的轮询能读到。
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        ch = browser.read_key()
+        if ch in (b"\r", b"\n"):
+            return True
+        browser.wait(200)
+    return False
+
+
 def _wait_for_next_lesson(browser, prev_detail_url):
-    # 正常完成一节网课后，不退出脚本，等待用户手动打开下一节；返回新的详情页 URL。
+    # 正常完成一节网课后，不退出脚本，等待用户手动打开下一节；返回详情页 URL。
     print("\n" + "=" * 60)
     print("[本节已完成] 等待你在浏览器中打开下一节网课...")
-    print("打开下一节后脚本会自动继续；按 Ctrl+C 可退出。")
+    print("打开下一节后脚本会自动继续；按 Enter 可立即检测（无需等待 5 秒）；")
+    print("若重新打开的是已学过的同一门课，将短暂倒计时，按 Enter 即继续该课或自动继续；")
+    print("按 Ctrl+C 可退出。")
     while True:
-        browser.wait(5000)
+        ch = browser.read_key()
+        if ch in (b"\r", b"\n"):
+            print("[唤醒] 用户按 Enter，立即检测当前 URL...")
+        else:
+            browser.wait(5000)
         cur = browser.get_current_url() or ""
-        if (config.COURSE_DETAIL_URL_MARK in cur
-                and cur != (prev_detail_url or "")):
+        if config.COURSE_DETAIL_URL_MARK in cur:
+            if cur == (prev_detail_url or ""):
+                # 打开的是上一轮学过的同一门课（URL 相同）：不自动跳过，
+                # 给短倒计时让用户确认；超时则默认继续，避免无人按 Enter 时永久卡住。
+                print("\n[提示] 打开的是已学过的同一门课程页面...")
+                if ch in (b"\r", b"\n"):
+                    print("[继续] 用户按 Enter 确认，继续处理该课程。")
+                elif _confirm_within_seconds(browser, config.WAIT_CONFIRM_SECONDS):
+                    print("[继续] 用户按 Enter 确认，继续处理该课程。")
+                else:
+                    print("[继续] 倒计时内未收到确认，默认继续处理该课程。")
+                return cur
             print(f"[继续] 检测到新课程详情页: {cur}")
             return cur
 
@@ -432,8 +461,10 @@ def main(course_url, enable_vlm=True):
                         consecutive_wait_count = 0
                         failed_candidates.clear()
                         pending_vlm = None
-                        browser.wait(int(random.uniform(
-                            config.MIN_DELAY_SEC, config.MAX_DELAY_SEC) * 1000))
+                        _delay_sec = random.uniform(
+                            config.MIN_DELAY_SEC, config.MAX_DELAY_SEC)
+                        print(f"[间隔] 下次操作随机停等：{_delay_sec:.1f} 秒")
+                        browser.wait(int(_delay_sec * 1000))
                     else:
                         failed_candidates.add(_candidate_key(cand))
                         no_progress_count += 1
